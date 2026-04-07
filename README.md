@@ -1,11 +1,7 @@
 # Investigation of intrinsically disordered regions in the Drosophila matrisome
 
-N Kasirosafar, MWU Kabir, MT Hoque  
-Wichita State University
-
 A reusable pipeline for investigating intrinsically disordered regions (IDRs) in the *Drosophila melanogaster* matrisome through sequence analysis, mutant generation, disorder prediction, and optional molecular dynamics (MD) comparison between wild-type and mutant proteins.
 
-This project is organized so the same workflow can be rerun for different sequences without editing hardcoded filenames inside the scripts.
 
 ## Overview
 
@@ -265,7 +261,6 @@ Typical outputs include:
 - disorder comparison plots
 - optional MD analysis outputs
 
-A good practice is to keep outputs grouped by sequence name under `results/SEQ_NAME/`.
 
 ## Notes
 
@@ -275,21 +270,6 @@ A good practice is to keep outputs grouped by sequence name under `results/SEQ_N
 - If a Docker container with the same name already exists, remove it or use a new name
 - The end-to-end workflow depends on your BLAST database path, Docker setup, and available structure or trajectory files
 
-## Troubleshooting
-
-### `psiblast: command not found`
-
-Install BLAST+ and make sure `psiblast` is on your `PATH`.
-
-### Docker container name already exists
-
-```bash
-docker rm -f seq1_orig
-```
-
-### Python import errors
-
-Run the Python scripts through `uv run` from the project root so the project environment is used consistently.
 
 ## Citation
 
@@ -297,11 +277,9 @@ If you use this project, please cite:
 
 N Kasirosafar, Md Wasi Ul Kabir, and Md Tamjidul Hoque. *Investigation of intrinsically disordered regions in the Drosophila matrisome*. Wichita State University.
 
-If your manuscript has a DOI, journal, preprint, or year, update this citation section with the full reference.
 
 ## Authors & Contact
 
-N Kasirosafar, Md Wasi Ul Kabir, Md Tamjidul Hoque  
-Wichita State University
+Md Wasi Ul Kabir, Nazanin Kasirosafar, Md Tamjidul Hoque, Raj Logan
 
 Questions/Issues: Md Tamjidul Hoque — thoque@uno.edu
