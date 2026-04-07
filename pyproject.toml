@@ -1,0 +1,37 @@
+[project]
+name = "drosophila-matrisome-idr"
+version = "0.1.0"
+description = "Pipeline for investigating intrinsically disordered regions in the Drosophila matrisome"
+readme = "README.md"
+requires-python = ">=3.10,<3.12"
+authors = [
+  { name = "N Kasirosafar" },
+  { name = "Md Wasi Ul Kabir" },
+  { name = "Md Tamjidul Hoque" },
+]
+dependencies = [
+  "biopython>=1.84",
+  "matplotlib>=3.8",
+  "mdanalysis>=2.7",
+  "mdtraj>=1.10",
+  "numpy>=1.26",
+  "pandas>=2.2",
+  "scipy>=1.13",
+]
+
+[project.optional-dependencies]
+notebooks = [
+  "ipykernel>=6.29",
+  "jupyter>=1.0",
+]
+
+dev = [
+  "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/idr_project"]

@@ -1,0 +1,13 @@
+name: idr_project
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - pandas
+  - matplotlib
+  - scipy
+  - mdanalysis
+  - mdtraj
+  - blast
+  - pip

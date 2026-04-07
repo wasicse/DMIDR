@@ -1,0 +1,26 @@
+; Production MD (NPT, restraints off)
+integrator      = md
+dt              = 0.002           ; 2 fs
+nsteps          = 3000000         ; 6 ns default
+nstxout-compressed = 1000
+nstenergy       = 1000
+nstlog          = 1000
+tcoupl          = V-rescale
+tc-grps         = Protein Non-Protein
+tau_t           = 1.0     1.0
+ref_t           = 280     280
+pcoupl          = Parrinello-Rahman
+pcoupltype      = isotropic
+tau_p           = 5.0
+ref_p           = 1.0
+compressibility = 4.5e-5
+cutoff-scheme   = Verlet
+coulombtype     = PME
+rcoulomb        = 0.9
+rvdw            = 0.9
+pbc             = xyz
+constraints     = h-bonds
+constraint-algorithm = lincs
+DispCorr        = EnerPres
+comm-mode       = Linear
+nstcomm         = 100

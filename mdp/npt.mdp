@@ -1,0 +1,27 @@
+; NPT with position restraints (settle density)
+define          = -DPOSRES
+integrator      = md
+dt              = 0.001
+nsteps          = 100000        ; 100 ps
+nstxout-compressed = 1000
+nstenergy       = 1000
+nstlog          = 1000
+tcoupl          = V-rescale
+tc-grps         = Protein Non-Protein
+tau_t           = 1.0     1.0
+ref_t           = 280     280
+pcoupl          = Parrinello-Rahman
+pcoupltype      = isotropic
+tau_p           = 5.0
+ref_p           = 1.0
+compressibility = 4.5e-5
+cutoff-scheme   = Verlet
+coulombtype     = PME
+rcoulomb        = 0.9
+rvdw            = 0.9
+pbc             = xyz
+constraints     = h-bonds
+constraint-algorithm = lincs
+DispCorr        = EnerPres
+comm-mode       = Linear
+nstcomm         = 100
