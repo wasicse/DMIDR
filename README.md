@@ -200,7 +200,7 @@ uv run python scripts/analyze_disorder.py \
   --label SEQ1_3res
 ```
 
-### 6. Optional MD analysis
+### 6. MD analysis
 
 ```bash
 uv run python scripts/analyze_md.py \
