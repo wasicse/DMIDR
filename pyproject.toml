@@ -3,14 +3,14 @@ name = "drosophila-matrisome-idr"
 version = "0.1.0"
 description = "Pipeline for investigating intrinsically disordered regions in the Drosophila matrisome"
 readme = "README.md"
-requires-python = ">=3.10,<3.12"
+requires-python = ">=3.11"
 authors = [
   { name = "N Kasirosafar" },
   { name = "Md Wasi Ul Kabir" },
   { name = "Md Tamjidul Hoque" },
 ]
 dependencies = [
-  "biopython>=1.84",
+  "colabfold[alphafold]>=1.5",
   "matplotlib>=3.8",
   "mdanalysis>=2.7",
   "mdtraj>=1.10",

@@ -14,6 +14,8 @@ PSSM_SCORE_COLUMNS = [
 
 PSSM_PERCENT_COLUMNS = [f'Perc_{aa}' for aa in PSSM_SCORE_COLUMNS]
 
+DISORDER_THRESHOLD = 0.5
+
 
 def read_blast_pssm(file_path: str | Path) -> pd.DataFrame:
     """Read an ASCII PSI-BLAST PSSM file into a dataframe."""
@@ -41,10 +43,16 @@ def read_blast_pssm(file_path: str | Path) -> pd.DataFrame:
 
 
 def read_disorder_file(file_path: str | Path) -> pd.DataFrame:
-    """Read Dispredict output text into a dataframe.
+    """Read an ESMDisPred .caid or legacy Dispredict .dispred file into a dataframe.
 
-    Expected non-header row format:
-        position amino_acid disorder_probability disordered_flag
+    .caid format (3 columns, no header lines):
+        position  amino_acid  disorder_probability
+
+    .dispred format (4 columns, with >header lines):
+        position  amino_acid  disorder_probability  disordered_flag
+
+    The binary Disordered column is read directly for .dispred files and
+    computed as prob >= 0.5 for .caid files.
     """
     file_path = Path(file_path)
     disorder_data: list[list[object]] = []
@@ -54,14 +62,11 @@ def read_disorder_file(file_path: str | Path) -> pd.DataFrame:
             if line.startswith('>') or not line.strip():
                 continue
             parts = line.strip().split()
-            if len(parts) != 4:
-                continue
-            disorder_data.append([
-                int(parts[0]),
-                parts[1],
-                float(parts[2]),
-                int(parts[3]),
-            ])
+            if len(parts) == 3:
+                prob = float(parts[2])
+                disorder_data.append([int(parts[0]), parts[1], prob, int(prob >= DISORDER_THRESHOLD)])
+            elif len(parts) == 4:
+                disorder_data.append([int(parts[0]), parts[1], float(parts[2]), int(parts[3])])
 
     if not disorder_data:
         raise ValueError(f'No disorder rows found in {file_path}')
@@ -84,8 +89,8 @@ def load_disorder_probability_table(path: str | Path) -> pd.DataFrame:
     path = Path(path)
     with path.open('r', encoding='utf-8', errors='ignore') as handle:
         first_line = handle.readline()
-    sep = ',' if ',' in first_line else '\t' if '\t' in first_line else None
-    df = pd.read_csv(path, sep=sep)
+    sep = ',' if ',' in first_line else '\t' if '\t' in first_line else r'\s+'
+    df = pd.read_csv(path, sep=sep, engine='python')
     required = {'resid', 'disorder_prob'}
     missing = required - set(df.columns)
     if missing:

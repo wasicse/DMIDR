@@ -1,5 +1,0 @@
-pandas>=2.0
-matplotlib>=3.7
-scipy>=1.10
-MDAnalysis>=2.6
-mdtraj>=1.9

@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+.venv/
+
+configs/local.env
+.env
+
+data/intermediate/
+results/

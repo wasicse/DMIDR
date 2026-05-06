@@ -63,7 +63,7 @@ organized_idr_project/
 - `psiblast` installed and available in your shell
 - access to a BLAST database
 - Docker for running DisPredict
-- `mkdssp` if you want secondary-structure analysis in the MD step
+- `mkdssp` if you want secondary-structure or ASA calculations
 
 ### Python dependencies
 
@@ -210,6 +210,48 @@ uv run python scripts/analyze_md.py \
   --mut-traj data/input/trajectories/mutant.xtc \
   --disorder-table results/SEQ1/disorder_probabilities.csv \
   --outdir results/SEQ1/md
+```
+
+### 7. Generate a PDB from FASTA (ColabFold)
+
+```bash
+bash scripts/run_colabfold.sh \
+  data/input/sequences/example.fasta \
+  results/example/alphafold
+```
+
+You can pass extra ColabFold options after the output directory. The script defaults to:
+
+- input FASTA: /home/mkabir3/Research/47_Dr_Raj_Colab/DMIDR/input/example.fasta
+- output dir: result/alphafold
+
+## ASA calculation
+
+Accessible surface area (ASA) is computed per residue using mdtraj's Shrake-Rupley algorithm — no external binary (mkdssp) required. Secondary structure is assigned with mdtraj's built-in DSSP implementation. Relative ASA is $rASA = ASA / MAX\_ASA$ (Wilke scale); residues are labelled "Exposed" if $rASA > 0.25$.
+
+**Single structure:**
+
+```bash
+uv run python scripts/calculate_asa.py \
+  --pdb data/input/pdb/wt.pdb \
+  --out results/SEQ1/wt_asa.csv
+```
+
+**All structures in a directory (e.g., ColabFold output):**
+
+```bash
+bash scripts/run_asa_all.sh \
+  results/example/alphafold \
+  results/example/asa
+```
+
+Optional chain filter:
+
+```bash
+uv run python scripts/calculate_asa.py \
+  --pdb data/input/pdb/wt.pdb \
+  --out results/SEQ1/wt_chainA_asa.csv \
+  --chain A
 ```
 
 ## One-Command Run
