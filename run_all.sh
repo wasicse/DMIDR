@@ -12,11 +12,22 @@
 #   8. MD analysis       — RMSF, contacts, DSSP (requires trajectory files)
 #
 # Usage (from project root):
-#   bash run_all.sh [configs/local.env]
+#   bash run_all.sh [--force] [configs/local.env]
+#
+# --force   Rerun all selected steps even if outputs already exist.
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
-CONFIG_FILE="${1:-$PROJECT_ROOT/configs/local.env}"
+
+FORCE=0
+CONFIG_FILE="$PROJECT_ROOT/configs/local.env"
+for arg in "$@"; do
+  if [[ "$arg" == "--force" ]]; then
+    FORCE=1
+  else
+    CONFIG_FILE="$arg"
+  fi
+done
 
 # ── Interactive step selection ─────────────────────────────────────────────────
 echo ""
@@ -74,6 +85,8 @@ fi
 
 INPUT_FASTA="${INPUT_FASTA:-$PROJECT_ROOT/data/input/sequences/example.fasta}"
 MAX_MUTATIONS="${MAX_MUTATIONS:-5}"
+MIN_DISORDER_PROB="${MIN_DISORDER_PROB:-0.5}"
+REQUIRED_RATIO="${REQUIRED_RATIO:-0.8}"
 MODEL="${MODEL:-3}"
 
 # Map menu selection to SKIP_* flags — done after config so menu always wins
@@ -87,12 +100,18 @@ SKIP_ASA=$(( 1 - RUN_STEP[7] ))
 SKIP_MD=$(( 1 - RUN_STEP[8] ))
 
 
-SEQUENCES_DIR="$PROJECT_ROOT/data/input/sequences/individual"
+SEQUENCES_DIR="$PROJECT_ROOT/data/input/sequences"
 MSA_DIR="$PROJECT_ROOT/data/input/msas"
 PSSM_DIR="$PROJECT_ROOT/data/intermediate/pssm"
 DISPRED_DIR="$PROJECT_ROOT/data/intermediate/dispred"
 
 mkdir -p "$SEQUENCES_DIR" "$PSSM_DIR" "$DISPRED_DIR"
+
+# ── ESMDisPred model download (one-time, skipped if already present) ───────────
+if [[ ! -f "$LARGE_MODELS_DIR/best.pt" ]]; then
+  echo "ESMDisPred models not found — downloading now..."
+  bash "$PROJECT_ROOT/scripts/tools/ESMDisPred/run_downloadLargeModels.sh"
+fi
 
 # ── Step 0: split multi-FASTA ──────────────────────────────────────────────────
 echo ""
@@ -105,12 +124,13 @@ uv run --project "$PROJECT_ROOT" python "$PROJECT_ROOT/scripts/split_fasta.py" \
 
 # ── Per-sequence loop ──────────────────────────────────────────────────────────
 for fasta in "$SEQUENCES_DIR"/*.fasta; do
+  [[ "$fasta" -ef "$INPUT_FASTA" ]] && continue   # skip the master input file itself
   seq_name="$(basename "$fasta" .fasta)"
   pssm_out="$PSSM_DIR/${seq_name}.pssm"
   orig_caid="$DISPRED_DIR/${seq_name}_original.caid"
-  fasta_dir="$PROJECT_ROOT/data/intermediate/fasta/$seq_name"
+  fasta_dir="$PROJECT_ROOT/data/intermediate/mutants/$seq_name"
   results_dir="$PROJECT_ROOT/results/$seq_name"
-  alphafold_dir="$results_dir/alphafold"
+  structure_dir="$results_dir/structure"
   asa_dir="$results_dir/asa"
   md_dir="$results_dir/md"
 
@@ -123,6 +143,8 @@ for fasta in "$SEQUENCES_DIR"/*.fasta; do
   # ── 1. PSSM ────────────────────────────────────────────────────────────────
   if [[ "$SKIP_PSSM" == "1" ]]; then
     echo "[1/8] Skipping PSSM"
+  elif [[ "$FORCE" == "0" && -f "$pssm_out" ]]; then
+    echo "[1/8] PSSM already exists, skipping → $pssm_out"
   else
     echo "[1/8] Generating PSSM → $pssm_out"
     bash "$PROJECT_ROOT/scripts/run_pssm.sh" "$fasta" "$BLAST_DB" "$pssm_out"
@@ -131,6 +153,8 @@ for fasta in "$SEQUENCES_DIR"/*.fasta; do
   # ── 2. ESMDisPred on original sequence ─────────────────────────────────────
   if [[ "$SKIP_ORIG_PRED" == "1" ]]; then
     echo "[2/8] Skipping ESMDisPred (original)"
+  elif [[ "$FORCE" == "0" && -f "$orig_caid" ]]; then
+    echo "[2/8] ESMDisPred (original) already exists, skipping → $orig_caid"
   else
     echo "[2/8] ESMDisPred (original) → $orig_caid"
     bash "$PROJECT_ROOT/scripts/run_esmdispred_single.sh" \
@@ -141,6 +165,8 @@ for fasta in "$SEQUENCES_DIR"/*.fasta; do
   # ── 3. Generate mutant FASTA files ─────────────────────────────────────────
   if [[ "$SKIP_MUTANT_GEN" == "1" ]]; then
     echo "[3/8] Skipping mutant generation"
+  elif [[ "$FORCE" == "0" ]] && compgen -G "$fasta_dir/*res.fasta" > /dev/null 2>&1; then
+    echo "[3/8] Mutant FASTAs already exist, skipping → $fasta_dir"
   else
     echo "[3/8] Generating mutants → $fasta_dir"
     uv run --project "$PROJECT_ROOT" python "$PROJECT_ROOT/scripts/generate_mutants.py" \
@@ -148,12 +174,16 @@ for fasta in "$SEQUENCES_DIR"/*.fasta; do
       --disorder "$orig_caid" \
       --output-dir "$fasta_dir" \
       --sequence-name "$seq_name" \
-      --max-mutations "$MAX_MUTATIONS"
+      --max-mutations "$MAX_MUTATIONS" \
+      --min-disorder-prob "$MIN_DISORDER_PROB" \
+      --required-ratio "$REQUIRED_RATIO"
   fi
 
   # ── 4. ESMDisPred on mutant FASTAs ─────────────────────────────────────────
   if [[ "$SKIP_MUTANT_PRED" == "1" ]]; then
     echo "[4/8] Skipping ESMDisPred (mutants)"
+  elif [[ "$FORCE" == "0" && -f "$DISPRED_DIR/${seq_name}_mutants_1res.caid" ]]; then
+    echo "[4/8] Mutant predictions already exist, skipping → $DISPRED_DIR"
   else
     echo "[4/8] ESMDisPred (mutants) → $DISPRED_DIR"
     bash "$PROJECT_ROOT/scripts/run_esmdispred.sh" \
@@ -168,14 +198,18 @@ for fasta in "$SEQUENCES_DIR"/*.fasta; do
     echo "[5/8] Disorder analysis → $results_dir"
     for i in $(seq 1 "$MAX_MUTATIONS"); do
       mutant_caid="$DISPRED_DIR/${seq_name}_mutants_${i}res.caid"
+      out_dir="$results_dir/disorder_${i}res"
       if [[ ! -f "$mutant_caid" ]]; then
         echo "  No mutant prediction for block size ${i}, skipping"
+        continue
+      elif [[ "$FORCE" == "0" ]] && compgen -G "$out_dir/*.csv" > /dev/null 2>&1; then
+        echo "  Block size ${i} analysis already exists, skipping"
         continue
       fi
       uv run --project "$PROJECT_ROOT" python "$PROJECT_ROOT/scripts/analyze_disorder.py" \
         --original "$orig_caid" \
         --mutant "$mutant_caid" \
-        --output-dir "$results_dir/disorder_${i}res" \
+        --output-dir "$out_dir" \
         --label "${seq_name}_${i}res"
     done
   fi
@@ -183,18 +217,19 @@ for fasta in "$SEQUENCES_DIR"/*.fasta; do
   # ── 6. Structure prediction (ColabFold) ────────────────────────────────────
   if [[ "$SKIP_COLABFOLD" == "1" ]]; then
     echo "[6/8] Skipping ColabFold"
+  elif [[ "$FORCE" == "0" ]] && compgen -G "$structure_dir/*.pdb" > /dev/null 2>&1; then
+    echo "[6/8] ColabFold output already exists, skipping → $structure_dir"
   else
-    echo "[6/8] ColabFold → $alphafold_dir"
+    echo "[6/8] ColabFold → $structure_dir"
     msa_file="$MSA_DIR/${seq_name}.a3m"
     if [[ -f "$msa_file" ]]; then
-      # Use pre-computed MSA — copy to a temp dir so ColabFold folds only this sequence
       tmp_msa="$MSA_DIR/.tmp_${seq_name}_$$"
       mkdir -p "$tmp_msa"
       cp "$msa_file" "$tmp_msa/"
-      bash "$PROJECT_ROOT/scripts/run_colabfold.sh" "$tmp_msa" "$alphafold_dir"
+      bash "$PROJECT_ROOT/scripts/run_colabfold.sh" "$tmp_msa" "$structure_dir"
       rm -rf "$tmp_msa"
     else
-      bash "$PROJECT_ROOT/scripts/run_colabfold.sh" "$fasta" "$alphafold_dir"
+      bash "$PROJECT_ROOT/scripts/run_colabfold.sh" "$fasta" "$structure_dir"
     fi
   fi
 
@@ -203,7 +238,11 @@ for fasta in "$SEQUENCES_DIR"/*.fasta; do
     echo "[7/8] Skipping ASA"
   else
     echo "[7/8] ASA calculation → $asa_dir"
-    bash "$PROJECT_ROOT/scripts/run_asa_all.sh" "$alphafold_dir" "$asa_dir"
+    if compgen -G "$structure_dir/*.pdb" > /dev/null 2>&1; then
+      bash "$PROJECT_ROOT/scripts/run_asa_all.sh" "$structure_dir" "$asa_dir"
+    else
+      echo "  [WARN] No PDB files in $structure_dir — run ColabFold first (step 6)."
+    fi
   fi
 
   # ── 8. MD analysis ─────────────────────────────────────────────────────────

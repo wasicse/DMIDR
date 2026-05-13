@@ -10,3 +10,15 @@ configs/local.env
 
 data/intermediate/
 results/
+data/input/msas/
+# Auto-split per-sequence FASTAs (generated from the main input by split_fasta.py)
+data/input/sequences/*.fasta
+!data/input/sequences/example.fasta
+
+# ESMDisPred tool — cloned separately, contains large model weights (not project source)
+scripts/tools/
+scripts/.cache/
+
+# MD/trajectory input data (too large for git)
+data/input/pdb/
+data/input/trajectories/

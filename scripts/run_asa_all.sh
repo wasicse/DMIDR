@@ -20,7 +20,11 @@ if ! command -v uv &>/dev/null; then
   exit 1
 fi
 
-mapfile -t PDBS < <(find "$PDB_DIR" -name "*.pdb" | sort)
+# Prefer rank_001, then model_1 as fallback.
+mapfile -t PDBS < <(find "$PDB_DIR" -name "*rank_001*.pdb" | sort)
+if [[ ${#PDBS[@]} -eq 0 ]]; then
+  mapfile -t PDBS < <(find "$PDB_DIR" -name "*model_1*.pdb" | sort)
+fi
 
 if [[ ${#PDBS[@]} -eq 0 ]]; then
   echo "No PDB files found in: $PDB_DIR" >&2

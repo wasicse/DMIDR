@@ -9,10 +9,10 @@ fi
 QUERY_FASTA="$1"
 BLAST_DB="$2"
 OUTPUT_PSSM="$3"
-THREADS="${4:-8}"
+THREADS="${4:-$(nproc)}"
 ITERATIONS="${5:-3}"
 
-psiblast \
+PYENV_VERSION=system psiblast \
   -query "$QUERY_FASTA" \
   -db "$BLAST_DB" \
   -num_iterations "$ITERATIONS" \
