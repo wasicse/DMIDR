@@ -70,7 +70,7 @@ fi
 
 if [[ "$SKIP_MUTANT_GENERATION" != "1" ]]; then
   step "[3/4] Generate mutant FASTA files"
-  PYTHONPATH="$PROJECT_ROOT/src" python "$PROJECT_ROOT/scripts/generate_mutants.py" \
+  uv run --project "$PROJECT_ROOT" python "$PROJECT_ROOT/scripts/generate_mutants.py" \
     --pssm "$PSSM_OUT" \
     --disorder "$ORIGINAL_DISPRED" \
     --output-dir "$FASTA_OUT" \

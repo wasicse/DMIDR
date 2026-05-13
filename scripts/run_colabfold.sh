@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-FASTA_DEFAULT="/home/mkabir3/Research/47_Dr_Raj_Colab/DMIDR/input/example.fasta"
-OUTDIR_DEFAULT="result/alphafold"
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+FASTA_DEFAULT="$PROJECT_ROOT/data/input/sequences/example.fasta"
+OUTDIR_DEFAULT="$PROJECT_ROOT/results/example/alphafold"
 
 fasta_path="${1:-$FASTA_DEFAULT}"
 output_dir="${2:-$OUTDIR_DEFAULT}"

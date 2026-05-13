@@ -9,6 +9,8 @@
 #   bash scripts/run_asa_all.sh results/example/alphafold results/example/asa
 set -euo pipefail
 
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
 PDB_DIR="${1:?Usage: $0 <pdb_dir> <results_dir> [extra flags]}"
 RESULTS_DIR="${2:?Usage: $0 <pdb_dir> <results_dir> [extra flags]}"
 shift 2
@@ -32,7 +34,7 @@ for pdb in "${PDBS[@]}"; do
   stem="$(basename "$pdb" .pdb)"
   out="$RESULTS_DIR/${stem}_asa.csv"
   echo "  Processing: $stem"
-  uv run python scripts/calculate_asa.py \
+  uv run --project "$PROJECT_ROOT" python "$PROJECT_ROOT/scripts/calculate_asa.py" \
     --pdb "$pdb" \
     --out "$out" \
     "$@"
