@@ -12,7 +12,7 @@ OUTPUT_PSSM="$3"
 THREADS="${4:-$(nproc)}"
 ITERATIONS="${5:-3}"
 
-PYENV_VERSION=system psiblast \
+"${BLAST_BIN:+${BLAST_BIN}/}psiblast" \
   -query "$QUERY_FASTA" \
   -db "$BLAST_DB" \
   -num_iterations "$ITERATIONS" \

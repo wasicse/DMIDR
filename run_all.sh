@@ -12,22 +12,80 @@
 #   8. MD analysis       — RMSF, contacts, DSSP (requires trajectory files)
 #
 # Usage (from project root):
-#   bash run_all.sh [--force] [configs/local.env]
+#   bash run_all.sh [--force] [--clean] [configs/local.env]
 #
 # --force   Rerun all selected steps even if outputs already exist.
+# --clean   Delete all previous outputs before running (fresh start).
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 
+# ── Logging — tee everything to a timestamped file in outputs/ ────────────────
+mkdir -p "$PROJECT_ROOT/outputs"
+LOG_FILE="$PROJECT_ROOT/outputs/run_$(date +%Y%m%d_%H%M%S).log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+echo "Logging to: $LOG_FILE"
+
 FORCE=0
+CLEAN=0
 CONFIG_FILE="$PROJECT_ROOT/configs/local.env"
 for arg in "$@"; do
   if [[ "$arg" == "--force" ]]; then
     FORCE=1
+  elif [[ "$arg" == "--clean" ]]; then
+    CLEAN=1
   else
     CONFIG_FILE="$arg"
   fi
 done
+
+# Source config early so ESMDISPRED_IMAGE is available for container stop.
+if [[ -f "$CONFIG_FILE" ]]; then
+  # shellcheck disable=SC1090
+  source "$CONFIG_FILE"
+fi
+
+# ── Clean previous run outputs ────────────────────────────────────────────────
+if [[ "$CLEAN" == "1" ]]; then
+  echo ""
+  echo "================================================================"
+  echo " --clean: removing all generated outputs"
+  echo "================================================================"
+  # Stop any running ESMDisPred containers (by image name and by output-dir mounts)
+  if [[ -n "${ESMDISPRED_IMAGE:-}" ]]; then
+    running=$(docker ps --filter "ancestor=${ESMDISPRED_IMAGE}" --format "{{.ID}}" 2>/dev/null || true)
+    if [[ -n "$running" ]]; then
+      echo "  Stopping ESMDisPred containers: $running"
+      docker stop $running 2>/dev/null || true
+      sleep 2
+    fi
+  fi
+  # Also stop any container whose mounts include our outputs directory
+  extra=$(docker ps --format "{{.ID}} {{.Mounts}}" 2>/dev/null \
+    | grep "$PROJECT_ROOT" | awk '{print $1}' || true)
+  if [[ -n "$extra" ]]; then
+    echo "  Stopping containers with project mounts: $extra"
+    docker stop $extra 2>/dev/null || true
+    sleep 2
+  fi
+  # Delete sequence outputs (keep pssm_cache for reuse)
+  for seq_dir in "$PROJECT_ROOT/outputs"/*/; do
+    [[ "$(basename "$seq_dir")" == "pssm_cache" ]] && continue
+    [[ "$(basename "$seq_dir")" == "sequences" ]] && continue
+    echo "  Removing $seq_dir"
+    rm -rf "$seq_dir" 2>/dev/null || true
+  done
+  # Delete wrong ESM2/Dispredict3.0 mutant feature caches
+  find "$PROJECT_ROOT/scripts/tools/ESMDisPred/features/ESM2" \
+       -name "Mutant_*.csv" -delete 2>/dev/null || true
+  find "$PROJECT_ROOT/scripts/tools/ESMDisPred/features/Dispredict3.0" \
+       -name "Mutant_*" -delete 2>/dev/null || true
+  # Delete old log files (except the current one)
+  find "$PROJECT_ROOT/outputs" -maxdepth 1 -name "run_*.log" \
+       ! -name "$(basename "$LOG_FILE")" -delete 2>/dev/null || true
+  echo "  Clean complete."
+  echo ""
+fi
 
 # ── Interactive step selection ─────────────────────────────────────────────────
 echo ""
@@ -46,7 +104,15 @@ echo ""
 echo "Enter step numbers to run (e.g. 1 2 3  or  1-5  or  6 7)."
 echo "Press Enter with no input to run ALL steps."
 echo ""
-read -rp "Steps: " STEP_INPUT
+if [[ -n "${PIPELINE_STEPS:-}" ]]; then
+  STEP_INPUT="$PIPELINE_STEPS"
+  echo "Steps (from env): $STEP_INPUT"
+elif [[ -t 0 ]]; then
+  read -rp "Steps: " STEP_INPUT
+else
+  echo "ERROR: PIPELINE_STEPS env var must be set when running non-interactively." >&2
+  exit 1
+fi
 
 # Parse selection into a set of enabled step numbers
 declare -A RUN_STEP
@@ -71,10 +137,7 @@ echo "Running steps: $(for s in 1 2 3 4 5 6 7 8; do [[ ${RUN_STEP[$s]} -eq 1 ]] 
 echo "================================================================"
 echo ""
 
-if [[ -f "$CONFIG_FILE" ]]; then
-  # shellcheck disable=SC1090
-  source "$CONFIG_FILE"
-else
+if [[ ! -f "$CONFIG_FILE" ]]; then
   echo "[WARN] Config file not found: $CONFIG_FILE" >&2
   echo "       Copy configs/example.env to configs/local.env and fill in the values." >&2
 fi
@@ -82,12 +145,24 @@ fi
 : "${BLAST_DB:?BLAST_DB is required — set it in $CONFIG_FILE}"
 : "${ESMDISPRED_IMAGE:?ESMDISPRED_IMAGE is required — set it in $CONFIG_FILE}"
 : "${LARGE_MODELS_DIR:?LARGE_MODELS_DIR is required — set it in $CONFIG_FILE}"
+export BLAST_BIN  # make available to background psiblast subprocesses
 
-INPUT_FASTA="${INPUT_FASTA:-$PROJECT_ROOT/data/input/sequences/example.fasta}"
-MAX_MUTATIONS="${MAX_MUTATIONS:-5}"
-MIN_DISORDER_PROB="${MIN_DISORDER_PROB:-0.5}"
-REQUIRED_RATIO="${REQUIRED_RATIO:-0.8}"
+INPUT_FASTA="${INPUT_FASTA:-$PROJECT_ROOT/data/input/example.fasta}"
 MODEL="${MODEL:-3}"
+
+# Mutation mode: random (default) or consecutive
+MUTATION_MODE="${MUTATION_MODE:-random}"
+MIN_DISORDER_PROB="${MIN_DISORDER_PROB:-0.5}"
+
+# Random-mode parameters
+NUM_VARIANTS="${NUM_VARIANTS:-200}"
+MUTATIONS_PER_SEQ="${MUTATIONS_PER_SEQ:-5}"
+MIN_SPACING="${MIN_SPACING:-5}"
+MUTATION_SEED="${MUTATION_SEED:-}"
+
+# Consecutive-mode parameters
+MAX_MUTATIONS="${MAX_MUTATIONS:-5}"
+REQUIRED_RATIO="${REQUIRED_RATIO:-0.8}"
 
 # Map menu selection to SKIP_* flags — done after config so menu always wins
 SKIP_PSSM=$(( 1 - RUN_STEP[1] ))
@@ -100,12 +175,12 @@ SKIP_ASA=$(( 1 - RUN_STEP[7] ))
 SKIP_MD=$(( 1 - RUN_STEP[8] ))
 
 
-SEQUENCES_DIR="$PROJECT_ROOT/data/input/sequences"
-MSA_DIR="$PROJECT_ROOT/data/input/msas"
-PSSM_DIR="$PROJECT_ROOT/data/intermediate/pssm"
-DISPRED_DIR="$PROJECT_ROOT/data/intermediate/dispred"
+SEQUENCES_DIR="$PROJECT_ROOT/outputs/sequences"
+MSA_DIR="$PROJECT_ROOT/data/msas"
+PSSM_CACHE_DIR="$PROJECT_ROOT/outputs/pssm_cache"
+export PSSM_CACHE_DIR
 
-mkdir -p "$SEQUENCES_DIR" "$PSSM_DIR" "$DISPRED_DIR"
+mkdir -p "$SEQUENCES_DIR" "$PSSM_CACHE_DIR"
 
 # ── ESMDisPred model download (one-time, skipped if already present) ───────────
 if [[ ! -f "$LARGE_MODELS_DIR/best.pt" ]]; then
@@ -122,32 +197,73 @@ uv run --project "$PROJECT_ROOT" python "$PROJECT_ROOT/scripts/split_fasta.py" \
   --input "$INPUT_FASTA" \
   --output-dir "$SEQUENCES_DIR"
 
+# ── Step 1: PSSM — run all sequences in parallel ───────────────────────────────
+mapfile -t _all_fastas < <(
+  for f in "$SEQUENCES_DIR"/*.fasta; do
+    [[ "$f" -ef "$INPUT_FASTA" ]] && continue
+    echo "$f"
+  done
+)
+_seq_count="${#_all_fastas[@]}"
+
+if [[ "$SKIP_PSSM" == "1" ]]; then
+  echo "[1/8] Skipping PSSM (all sequences)"
+elif [[ "$_seq_count" -gt 0 ]]; then
+  # Divide cores evenly; cap at 16 per job (PSI-BLAST I/O-bound beyond that)
+  _threads_each=$(( $(nproc) / _seq_count ))
+  _threads_each=$(( _threads_each < 1 ? 1 : _threads_each > 16 ? 16 : _threads_each ))
+  echo ""
+  echo "================================================================"
+  echo "Step 1: PSSM — ${_seq_count} sequences × ${_threads_each} threads in parallel"
+  echo "================================================================"
+  _pssm_pids=()
+  for _fasta in "${_all_fastas[@]}"; do
+    _sname="$(basename "$_fasta" .fasta)"
+    _pout="$PROJECT_ROOT/outputs/$_sname/pssm/${_sname}.pssm"
+    mkdir -p "$(dirname "$_pout")"
+    if [[ "$FORCE" == "0" && -f "$_pout" ]]; then
+      echo "  [skip] $_sname — already exists"
+    else
+      echo "  [run]  $_sname → $_pout"
+      bash "$PROJECT_ROOT/scripts/run_pssm.sh" \
+        "$_fasta" "$BLAST_DB" "$_pout" "$_threads_each" &
+      _pssm_pids+=($!)
+    fi
+  done
+  if [[ ${#_pssm_pids[@]} -gt 0 ]]; then
+    echo "  Waiting for ${#_pssm_pids[@]} PSSM job(s)..."
+    for _pid in "${_pssm_pids[@]}"; do wait "$_pid" || { echo "PSSM job $_pid failed" >&2; exit 1; }; done
+    echo "  All PSSM jobs done."
+  fi
+fi
+
 # ── Per-sequence loop ──────────────────────────────────────────────────────────
-for fasta in "$SEQUENCES_DIR"/*.fasta; do
-  [[ "$fasta" -ef "$INPUT_FASTA" ]] && continue   # skip the master input file itself
+for fasta in "${_all_fastas[@]}"; do
   seq_name="$(basename "$fasta" .fasta)"
-  pssm_out="$PSSM_DIR/${seq_name}.pssm"
-  orig_caid="$DISPRED_DIR/${seq_name}_original.caid"
-  fasta_dir="$PROJECT_ROOT/data/intermediate/mutants/$seq_name"
-  results_dir="$PROJECT_ROOT/results/$seq_name"
+  results_dir="$PROJECT_ROOT/outputs/$seq_name"
+  pssm_dir="$results_dir/pssm"
+  dispred_dir="$results_dir/dispred"
+  mutants_dir="$results_dir/mutants"
   structure_dir="$results_dir/structure"
   asa_dir="$results_dir/asa"
   md_dir="$results_dir/md"
+  pssm_out="$pssm_dir/${seq_name}.pssm"
+  orig_caid="$dispred_dir/${seq_name}_original.caid"
 
   echo ""
   echo "================================================================"
   echo "Sequence: $seq_name"
   echo "================================================================"
-  mkdir -p "$fasta_dir" "$results_dir"
+  mkdir -p "$pssm_dir" "$dispred_dir" "$mutants_dir" "$structure_dir" "$asa_dir"
 
-  # ── 1. PSSM ────────────────────────────────────────────────────────────────
+  # ── 1. PSSM (already done above in parallel) ───────────────────────────────
   if [[ "$SKIP_PSSM" == "1" ]]; then
     echo "[1/8] Skipping PSSM"
-  elif [[ "$FORCE" == "0" && -f "$pssm_out" ]]; then
-    echo "[1/8] PSSM already exists, skipping → $pssm_out"
+  elif [[ -f "$pssm_out" ]]; then
+    echo "[1/8] PSSM done → $pssm_out"
   else
-    echo "[1/8] Generating PSSM → $pssm_out"
-    bash "$PROJECT_ROOT/scripts/run_pssm.sh" "$fasta" "$BLAST_DB" "$pssm_out"
+    echo "[1/8] PSSM missing for $seq_name — something went wrong" >&2
+    exit 1
   fi
 
   # ── 2. ESMDisPred on original sequence ─────────────────────────────────────
@@ -158,37 +274,57 @@ for fasta in "$SEQUENCES_DIR"/*.fasta; do
   else
     echo "[2/8] ESMDisPred (original) → $orig_caid"
     bash "$PROJECT_ROOT/scripts/run_esmdispred_single.sh" \
-      "$fasta" "$DISPRED_DIR" "$ESMDISPRED_IMAGE" "$LARGE_MODELS_DIR" \
+      "$fasta" "$dispred_dir" "$ESMDISPRED_IMAGE" "$LARGE_MODELS_DIR" \
       "${seq_name}_original" "$MODEL"
   fi
 
   # ── 3. Generate mutant FASTA files ─────────────────────────────────────────
   if [[ "$SKIP_MUTANT_GEN" == "1" ]]; then
     echo "[3/8] Skipping mutant generation"
-  elif [[ "$FORCE" == "0" ]] && compgen -G "$fasta_dir/*res.fasta" > /dev/null 2>&1; then
-    echo "[3/8] Mutant FASTAs already exist, skipping → $fasta_dir"
+  elif [[ "$FORCE" == "0" ]] && compgen -G "$mutants_dir/*res.fasta" > /dev/null 2>&1; then
+    echo "[3/8] Mutant FASTAs already exist, skipping → $mutants_dir"
   else
-    echo "[3/8] Generating mutants → $fasta_dir"
+    echo "[3/8] Generating mutants (mode=$MUTATION_MODE) → $mutants_dir"
+    _seed_arg=()
+    [[ -n "$MUTATION_SEED" ]] && _seed_arg=(--seed "$MUTATION_SEED")
     uv run --project "$PROJECT_ROOT" python "$PROJECT_ROOT/scripts/generate_mutants.py" \
       --pssm "$pssm_out" \
       --disorder "$orig_caid" \
-      --output-dir "$fasta_dir" \
+      --output-dir "$mutants_dir" \
       --sequence-name "$seq_name" \
-      --max-mutations "$MAX_MUTATIONS" \
+      --mode "$MUTATION_MODE" \
       --min-disorder-prob "$MIN_DISORDER_PROB" \
-      --required-ratio "$REQUIRED_RATIO"
+      --num-variants "$NUM_VARIANTS" \
+      --mutations-per-seq "$MUTATIONS_PER_SEQ" \
+      --min-spacing "$MIN_SPACING" \
+      --max-mutations "$MAX_MUTATIONS" \
+      --required-ratio "$REQUIRED_RATIO" \
+      "${_seed_arg[@]}"
   fi
 
   # ── 4. ESMDisPred on mutant FASTAs ─────────────────────────────────────────
   if [[ "$SKIP_MUTANT_PRED" == "1" ]]; then
     echo "[4/8] Skipping ESMDisPred (mutants)"
-  elif [[ "$FORCE" == "0" && -f "$DISPRED_DIR/${seq_name}_mutants_1res.caid" ]]; then
-    echo "[4/8] Mutant predictions already exist, skipping → $DISPRED_DIR"
   else
-    echo "[4/8] ESMDisPred (mutants) → $DISPRED_DIR"
-    bash "$PROJECT_ROOT/scripts/run_esmdispred.sh" \
-      "$fasta_dir" "$DISPRED_DIR" "$ESMDISPRED_IMAGE" "$LARGE_MODELS_DIR" \
-      "$seq_name" "$MAX_MUTATIONS" "$MODEL"
+    # Check each block size individually — only skip sizes that already have a .caid
+    _need_pred=0
+    for _i in $(seq 1 "$MAX_MUTATIONS"); do
+      _fasta=$(find "$mutants_dir" -maxdepth 1 -name "*_mutants_${_i}res.fasta" | head -n 1)
+      [[ -z "$_fasta" ]] && continue
+      if [[ "$FORCE" == "0" && -f "$dispred_dir/${seq_name}_mutants_${_i}res.caid" ]]; then
+        echo "[4/8] Block ${_i}res already exists, skipping"
+      else
+        _need_pred=1
+      fi
+    done
+    if [[ "$_need_pred" == "1" ]]; then
+      echo "[4/8] ESMDisPred (mutants) → $dispred_dir"
+      bash "$PROJECT_ROOT/scripts/run_esmdispred.sh" \
+        "$mutants_dir" "$dispred_dir" "$ESMDISPRED_IMAGE" "$LARGE_MODELS_DIR" \
+        "$seq_name" "$MAX_MUTATIONS" "$MODEL"
+    else
+      echo "[4/8] All mutant predictions already exist → $dispred_dir"
+    fi
   fi
 
   # ── 5. Disorder comparison analysis ────────────────────────────────────────
@@ -197,7 +333,7 @@ for fasta in "$SEQUENCES_DIR"/*.fasta; do
   else
     echo "[5/8] Disorder analysis → $results_dir"
     for i in $(seq 1 "$MAX_MUTATIONS"); do
-      mutant_caid="$DISPRED_DIR/${seq_name}_mutants_${i}res.caid"
+      mutant_caid="$dispred_dir/${seq_name}_mutants_${i}res.caid"
       out_dir="$results_dir/disorder_${i}res"
       if [[ ! -f "$mutant_caid" ]]; then
         echo "  No mutant prediction for block size ${i}, skipping"
@@ -250,10 +386,10 @@ for fasta in "$SEQUENCES_DIR"/*.fasta; do
     echo "[8/8] Skipping MD analysis"
   else
     echo "[8/8] MD analysis → $md_dir"
-    wt_top="$PROJECT_ROOT/data/input/pdb/${seq_name}_wt.pdb"
-    wt_traj="$PROJECT_ROOT/data/input/trajectories/${seq_name}_wt.xtc"
-    mut_top="$PROJECT_ROOT/data/input/pdb/${seq_name}_mutant.pdb"
-    mut_traj="$PROJECT_ROOT/data/input/trajectories/${seq_name}_mutant.xtc"
+    wt_top="$PROJECT_ROOT/data/pdb/${seq_name}_wt.pdb"
+    wt_traj="$PROJECT_ROOT/data/trajectories/${seq_name}_wt.xtc"
+    mut_top="$PROJECT_ROOT/data/pdb/${seq_name}_mutant.pdb"
+    mut_traj="$PROJECT_ROOT/data/trajectories/${seq_name}_mutant.xtc"
     disorder_table="$results_dir/disorder_1res/${seq_name}_1res_disorder_probability_comparison.csv"
 
     missing=()
@@ -283,5 +419,5 @@ done
 echo ""
 echo "================================================================"
 echo "All sequences complete."
-echo "Results: $PROJECT_ROOT/results/"
+echo "Results: $PROJECT_ROOT/outputs/"
 echo "================================================================"

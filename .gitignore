@@ -8,17 +8,13 @@ __pycache__/
 configs/local.env
 .env
 
-data/intermediate/
-results/
-data/input/msas/
-# Auto-split per-sequence FASTAs (generated from the main input by split_fasta.py)
-data/input/sequences/*.fasta
-!data/input/sequences/example.fasta
+outputs/
+outputs_old/
+# User-provided large supplementary data (not committed — too large or machine-specific)
+data/msas/
+data/pdb/
+data/trajectories/
 
-# ESMDisPred tool — cloned separately, contains large model weights (not project source)
+# ESMDisPred tool — cloned separately, contains large model weights
 scripts/tools/
 scripts/.cache/
-
-# MD/trajectory input data (too large for git)
-data/input/pdb/
-data/input/trajectories/

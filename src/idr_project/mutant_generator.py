@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random as _random
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,86 @@ def merge_pssm_and_disorder(pssm_df: pd.DataFrame, disorder_df: pd.DataFrame) ->
     return merged
 
 
+# ── Random mode (logic from legacy/run_mutaion_V2.py) ────────────────────────
+
+def generate_random_mutants(
+    pssm_df: pd.DataFrame,
+    disorder_df: pd.DataFrame,
+    num_variants: int = 200,
+    mutations_per_seq: int = 5,
+    min_disorder_prob: float = 0.5,
+    min_spacing: int = 5,
+    seed: int | None = None,
+) -> dict[int, list[tuple[str, str]]]:
+    """Generate random-position mutants grouped by mutation count.
+
+    For each count in 1..mutations_per_seq, generates num_variants independent
+    variants each with exactly that many randomly chosen disordered sites mutated.
+    Returns {1: [...], 2: [...], ..., mutations_per_seq: [...]} so save_mutants()
+    writes one file per count, mirroring the consecutive mode structure.
+    """
+    if seed is not None:
+        _random.seed(seed)
+
+    merged_df = merge_pssm_and_disorder(pssm_df, disorder_df)
+    original_sequence = list(merged_df['Residue'])
+
+    candidates = merged_df[
+        (merged_df['Disordered'] == 1) &
+        (merged_df['Residue'].isin(DISORDER_PROMOTING)) &
+        (merged_df['DisorderProb'] > min_disorder_prob)
+    ].copy()
+    candidates = candidates.sort_values(by=['DisorderProb', 'Information'], ascending=[False, True])
+    top_k = candidates.head(100)
+    positions = top_k['Position'].tolist()
+
+    mutants_by_count: dict[int, list[tuple[str, str]]] = {}
+
+    for n_mut in range(1, mutations_per_seq + 1):
+        records: list[tuple[str, str]] = []
+
+        for variant_idx in range(1, num_variants + 1):
+            _random.shuffle(positions)
+
+            selected_positions: list[int] = []
+            for pos in positions:
+                if all(abs(pos - sel) >= min_spacing for sel in selected_positions):
+                    selected_positions.append(pos)
+                if len(selected_positions) >= n_mut * 3:
+                    break
+
+            mutated_sequence = original_sequence.copy()
+            actual_mutations = 0
+            mutation_details: list[str] = []
+
+            for pos in selected_positions:
+                if actual_mutations >= n_mut:
+                    break
+
+                row = merged_df[merged_df['Position'] == pos].iloc[0]
+                original_aa = row['Residue']
+                scores = row[ORDER_PROMOTING].dropna().astype(float).sort_values(ascending=False)
+
+                for alt in scores.index:
+                    if alt != original_aa:
+                        mutated_sequence[pos - 1] = alt
+                        mutation_details.append(f'{original_aa}{pos}{alt}')
+                        actual_mutations += 1
+                        break
+
+            if actual_mutations < n_mut:
+                print(f'Warning: Only {actual_mutations} mutations made for Mutant_{variant_idx} (expected {n_mut})')
+
+            header = f"Mutant_{variant_idx}_Res{n_mut}_" + '_'.join(mutation_details)
+            records.append((header, ''.join(mutated_sequence)))
+
+        mutants_by_count[n_mut] = records
+
+    return mutants_by_count
+
+
+# ── Consecutive mode (original logic unchanged) ───────────────────────────────
+
 def generate_consecutive_mutants(
     pssm_df: pd.DataFrame,
     disorder_df: pd.DataFrame,
@@ -34,7 +115,7 @@ def generate_consecutive_mutants(
     min_disorder_prob: float = 0.5,
     required_ratio: float = 0.8,
 ) -> dict[int, list[tuple[str, str]]]:
-    """Generate mutant FASTA records grouped by mutation block size.
+    """Generate mutant FASTA records grouped by consecutive block size.
 
     Returns a dict like {1: [(header, sequence), ...], 2: [...]}.
     """
@@ -84,6 +165,8 @@ def generate_consecutive_mutants(
     return dict(mutants_by_size)
 
 
+# ── Shared save + entry point ─────────────────────────────────────────────────
+
 def save_mutants(mutants_by_size: dict[int, list[tuple[str, str]]], output_dir: str | Path, prefix: str) -> list[MutationSummary]:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -106,17 +189,39 @@ def run_mutant_generation(
     disorder_path: str | Path,
     output_dir: str | Path,
     sequence_name: str,
+    mode: str = 'random',
+    # random-mode params
+    num_variants: int = 200,
+    mutations_per_seq: int = 5,
+    min_spacing: int = 5,
+    seed: int | None = None,
+    # consecutive-mode params
     max_mutations: int = 5,
     min_disorder_prob: float = 0.5,
     required_ratio: float = 0.8,
 ) -> list[MutationSummary]:
     pssm_df = read_blast_pssm(pssm_path)
     disorder_df = read_disorder_file(disorder_path)
-    mutants = generate_consecutive_mutants(
-        pssm_df=pssm_df,
-        disorder_df=disorder_df,
-        max_mutations=max_mutations,
-        min_disorder_prob=min_disorder_prob,
-        required_ratio=required_ratio,
-    )
+
+    if mode == 'random':
+        mutants = generate_random_mutants(
+            pssm_df=pssm_df,
+            disorder_df=disorder_df,
+            num_variants=num_variants,
+            mutations_per_seq=mutations_per_seq,
+            min_disorder_prob=min_disorder_prob,
+            min_spacing=min_spacing,
+            seed=seed,
+        )
+    elif mode == 'consecutive':
+        mutants = generate_consecutive_mutants(
+            pssm_df=pssm_df,
+            disorder_df=disorder_df,
+            max_mutations=max_mutations,
+            min_disorder_prob=min_disorder_prob,
+            required_ratio=required_ratio,
+        )
+    else:
+        raise ValueError(f"Unknown mode '{mode}'. Choose 'random' or 'consecutive'.")
+
     return save_mutants(mutants, output_dir=output_dir, prefix=sequence_name)

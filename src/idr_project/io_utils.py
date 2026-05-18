@@ -58,8 +58,14 @@ def read_disorder_file(file_path: str | Path) -> pd.DataFrame:
     disorder_data: list[list[object]] = []
 
     with file_path.open('r', encoding='utf-8', errors='ignore') as handle:
+        seen_header = False
         for line in handle:
-            if line.startswith('>') or not line.strip():
+            if line.startswith('>'):
+                if seen_header:
+                    break  # stop at second sequence — only use first chain
+                seen_header = True
+                continue
+            if not line.strip():
                 continue
             parts = line.strip().split()
             if len(parts) == 3:

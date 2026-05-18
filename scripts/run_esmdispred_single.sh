@@ -19,7 +19,10 @@ LARGE_MODELS_DIR="$(realpath "$4")"
 OUTPUT_STEM="$5"
 MODEL="${6:-3}"
 
+PROJECT_ROOT="$(realpath "$(dirname "$0")/..")"
 ESMDISPRED_DIR="$(realpath "$(dirname "$0")/tools/ESMDisPred")"
+DISOCOMB_SH="$PROJECT_ROOT/scripts/esmdispred/DisoComb.sh"
+PSSM_CACHE_DIR="${PSSM_CACHE_DIR:-}"
 
 if [[ ! -d "$ESMDISPRED_DIR" ]]; then
   echo "Error: ESMDisPred tool not found at $ESMDISPRED_DIR" >&2
@@ -32,6 +35,21 @@ tmp_out="$(mktemp -d)"
 fasta_filename="$(basename "$FASTA")"
 ESMpath="/opt/ESMDisPred"
 
+# Build optional extra mounts for parallel PSI-BLAST and PSSM cache
+extra_mounts=()
+if [[ -f "$DISOCOMB_SH" ]]; then
+  extra_mounts+=(
+    -v "$DISOCOMB_SH":"$ESMpath/tools/Dispredict3.0/tools/fldpnn/DisoComb.sh":ro
+  )
+fi
+if [[ -n "$PSSM_CACHE_DIR" ]]; then
+  mkdir -p "$PSSM_CACHE_DIR"
+  extra_mounts+=(
+    -v "$PSSM_CACHE_DIR":"$ESMpath/pssm_cache":rw
+    -e PSSM_CACHE="$ESMpath/pssm_cache"
+  )
+fi
+
 # Run from inside the ESMDisPred directory so $(pwd) resolves all script mounts correctly.
 pushd "$ESMDISPRED_DIR" > /dev/null
 
@@ -43,6 +61,7 @@ docker run --rm \
   -e HOME="$ESMpath" \
   -e XDG_CACHE_HOME="$ESMpath/.cache" \
   -e TORCH_HOME="$ESMpath/largeModels" \
+  "${extra_mounts[@]}" \
   -v "$FASTA":"$ESMpath/example/$fasta_filename":ro \
   -v "$tmp_out":"$ESMpath/outputs":rw \
   -v "$(pwd)/features":"$ESMpath/features":rw \
@@ -62,9 +81,19 @@ docker run --rm \
 
 popd > /dev/null
 
-mapfile -t caid_files < <(find "$tmp_out" -name "*.caid" | sort)
+# Map numeric model choice to the subdirectory name ESMDisPred writes into.
+case "$MODEL" in
+  1|ESMDisPred-1)    _model_dir="ESMDisPred-1" ;;
+  2|ESMDisPred-2)    _model_dir="ESMDisPred-2" ;;
+  4|ESMDisPred-DNN)  _model_dir="ESMDisPred-DNN" ;;
+  *)                 _model_dir="ESMDisPred-2PDB" ;;  # default: model 3
+esac
+
+# Collect only the final ESMDisPred predictions — DisPredict3.0 also copies
+# its outputs into disorder/Dispredict3.0/, which must be excluded.
+mapfile -t caid_files < <(find "$tmp_out/disorder/$_model_dir" -name "*.caid" 2>/dev/null | sort)
 if [[ ${#caid_files[@]} -eq 0 ]]; then
-  echo "ERROR: No .caid output from ESMDisPred for $FASTA" >&2
+  echo "ERROR: No .caid files found in disorder/$_model_dir/ for $FASTA" >&2
   rm -rf "$tmp_out"
   exit 1
 fi
