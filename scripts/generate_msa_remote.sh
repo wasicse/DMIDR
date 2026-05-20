@@ -113,7 +113,7 @@ echo \"=== Node: \$(hostname) ===\"
 if [[ ! -x \"\$VENV/bin/colabfold_batch\" ]]; then
   echo \"Installing colabfold into \$VENV ...\"
   python3 -m venv \"\$VENV\"
-  \"\$VENV/bin/pip\" install --quiet colabfold
+\"\$VENV/bin/pip\" install --quiet 'colabfold[alphafold]'
   echo \"Install complete.\"
 else
   echo \"colabfold already installed at \$VENV/bin/colabfold_batch\"
@@ -125,7 +125,7 @@ echo \"Running colabfold_batch --msa-only ...\"
 echo \"=== Job done: \$(date) ===\"
 SLURM_SCRIPT
 
-sbatch /tmp/colabfold_msa_job.sh 2>&1 | grep -oP '(?<=job )\d+'
+/usr/local/slurm/bin/sbatch /tmp/colabfold_msa_job.sh 2>&1 | grep -oP '(?<=job )\d+'
 ")
 
 if [[ -z "$JOB_ID" ]]; then
@@ -143,7 +143,7 @@ echo "  (polling every 30 s — Ctrl-C to abort)"
 POLL_INTERVAL=30
 while true; do
   STATE=$(ssh "$MSA_REMOTE_HOST" "
-    squeue -j '$JOB_ID' -h -o '%T' 2>/dev/null || sacct -j '$JOB_ID' -n -o State%20 2>/dev/null | head -1 | tr -d ' '
+    /usr/local/slurm/bin/squeue -j '$JOB_ID' -h -o '%T' 2>/dev/null || /usr/local/slurm/bin/sacct -j '$JOB_ID' -n -o State%20 2>/dev/null | head -1 | tr -d ' '
   " 2>/dev/null || true)
   STATE="${STATE:-UNKNOWN}"
 
@@ -162,7 +162,7 @@ while true; do
     ""|UNKNOWN)
       # squeue returns nothing once job disappears — check sacct
       SACCT_STATE=$(ssh "$MSA_REMOTE_HOST" \
-        "sacct -j '$JOB_ID' -n -o State%20 2>/dev/null | head -1 | tr -d ' '" || true)
+        "/usr/local/slurm/bin/sacct -j '$JOB_ID' -n -o State%20 2>/dev/null | head -1 | tr -d ' '" || true)
       if [[ "$SACCT_STATE" == "COMPLETED" ]]; then
         echo "  Job $JOB_ID completed (via sacct)."
         break

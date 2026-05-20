@@ -149,6 +149,7 @@ export BLAST_BIN  # make available to background psiblast subprocesses
 
 INPUT_FASTA="${INPUT_FASTA:-$PROJECT_ROOT/data/input/example.fasta}"
 MODEL="${MODEL:-3}"
+TOP_N_CANDIDATES="${TOP_N_CANDIDATES:-3}"
 
 # Mutation mode: random (default) or consecutive
 MUTATION_MODE="${MUTATION_MODE:-random}"
@@ -350,38 +351,101 @@ for fasta in "${_all_fastas[@]}"; do
     done
   fi
 
-  # ── 6. Structure prediction (ColabFold) ────────────────────────────────────
-  if [[ "$SKIP_COLABFOLD" == "1" ]]; then
-    echo "[6/8] Skipping ColabFold"
-  elif [[ "$FORCE" == "0" ]] && compgen -G "$structure_dir/*.pdb" > /dev/null 2>&1; then
-    echo "[6/8] ColabFold output already exists, skipping → $structure_dir"
+  # ── 5.5 Select top candidates by disorder reduction ───────────────────────
+  candidates_dir="$results_dir/candidates"
+  if [[ "$SKIP_COLABFOLD" == "1" && "$SKIP_ASA" == "1" ]]; then
+    echo "[5.5] Skipping candidate selection (steps 6-7 both skipped)"
+  elif [[ "$FORCE" == "0" ]] && compgen -G "$candidates_dir/candidate_*.fasta" > /dev/null 2>&1; then
+    echo "[5.5] Candidates already selected, skipping → $candidates_dir"
   else
-    echo "[6/8] ColabFold → $structure_dir"
-    msa_file="$MSA_DIR/${seq_name}.a3m"
-    if [[ -f "$msa_file" ]]; then
-      tmp_msa="$MSA_DIR/.tmp_${seq_name}_$$"
-      mkdir -p "$tmp_msa"
-      cp "$msa_file" "$tmp_msa/"
-      bash "$PROJECT_ROOT/scripts/run_colabfold.sh" "$tmp_msa" "$structure_dir"
-      rm -rf "$tmp_msa"
-    else
-      bash "$PROJECT_ROOT/scripts/run_colabfold.sh" "$fasta" "$structure_dir"
-    fi
+    echo "[5.5] Selecting top $TOP_N_CANDIDATES candidates → $candidates_dir"
+    uv run --project "$PROJECT_ROOT" python "$PROJECT_ROOT/scripts/select_candidates.py" \
+      --dispred-dir "$dispred_dir" \
+      --mutants-dir "$mutants_dir" \
+      --output-dir "$candidates_dir" \
+      --sequence-name "$seq_name" \
+      --top-n "$TOP_N_CANDIDATES" \
+      --max-block-size "$MAX_MUTATIONS"
   fi
 
-  # ── 7. ASA calculation on ColabFold PDB outputs ────────────────────────────
+  # ── 6. Structure prediction (ColabFold) — wild-type + each candidate ───────
+  if [[ "$SKIP_COLABFOLD" == "1" ]]; then
+    echo "[6/8] Skipping ColabFold"
+  else
+    # ── 6a. Fetch MSA via remote if not already present ─────────────────────
+    msa_file="$MSA_DIR/${seq_name}.a3m"
+    if [[ -f "$msa_file" ]]; then
+      echo "[6/8] MSA already present → $msa_file"
+    elif [[ -n "${MSA_REMOTE_HOST:-}" && -n "${MSA_REMOTE_DIR:-}" ]]; then
+      echo "[6/8] MSA not found — submitting to $MSA_REMOTE_HOST via SLURM ..."
+      CONFIG_FILE="$CONFIG_FILE" \
+        bash "$PROJECT_ROOT/scripts/generate_msa_remote.sh" "$fasta" "$MSA_DIR"
+    else
+      echo "[6/8] WARN: No MSA found and MSA_REMOTE_HOST not set." \
+           "ColabFold will attempt to reach the MSA server directly."
+    fi
+
+    # ── 6b. Build list: wild-type first, then candidates ────────────────────
+    _cf_targets=("$fasta")
+    _cf_outdirs=("$structure_dir")
+    if compgen -G "$candidates_dir/candidate_*.fasta" > /dev/null 2>&1; then
+      for _cf in "$candidates_dir"/candidate_*.fasta; do
+        _cname="$(basename "$_cf" .fasta)"
+        _cf_targets+=("$_cf")
+        _cf_outdirs+=("$results_dir/structure_${_cname}")
+      done
+    fi
+
+    for _idx in "${!_cf_targets[@]}"; do
+      _cf_fasta="${_cf_targets[$_idx]}"
+      _cf_outdir="${_cf_outdirs[$_idx]}"
+      _cf_label="$(basename "$_cf_fasta" .fasta)"
+
+      if [[ "$FORCE" == "0" ]] && compgen -G "$_cf_outdir/*.pdb" > /dev/null 2>&1; then
+        echo "[6/8] ColabFold already done, skipping → $_cf_outdir"
+        continue
+      fi
+      echo "[6/8] ColabFold: $_cf_label → $_cf_outdir"
+
+      # Use pre-computed WT MSA for all targets (valid for small mutations)
+      if [[ -f "$msa_file" ]]; then
+        tmp_msa="$MSA_DIR/.tmp_${seq_name}_${_idx}_$$"
+        mkdir -p "$tmp_msa"
+        cp "$msa_file" "$tmp_msa/"
+        bash "$PROJECT_ROOT/scripts/run_colabfold.sh" "$tmp_msa" "$_cf_outdir"
+        rm -rf "$tmp_msa"
+      else
+        bash "$PROJECT_ROOT/scripts/run_colabfold.sh" "$_cf_fasta" "$_cf_outdir"
+      fi
+    done
+  fi
+
+  # ── 7. ASA — wild-type + each candidate ────────────────────────────────────
   if [[ "$SKIP_ASA" == "1" ]]; then
     echo "[7/8] Skipping ASA"
   else
-    echo "[7/8] ASA calculation → $asa_dir"
-    if compgen -G "$structure_dir/*.pdb" > /dev/null 2>&1; then
-      bash "$PROJECT_ROOT/scripts/run_asa_all.sh" "$structure_dir" "$asa_dir"
-    else
-      echo "  [WARN] No PDB files in $structure_dir — run ColabFold first (step 6)."
+    _asa_pairs=("$structure_dir:$asa_dir")
+    if compgen -G "$candidates_dir/candidate_*.fasta" > /dev/null 2>&1; then
+      for _cf in "$candidates_dir"/candidate_*.fasta; do
+        _cname="$(basename "$_cf" .fasta)"
+        _asa_pairs+=("$results_dir/structure_${_cname}:$results_dir/asa_${_cname}")
+      done
     fi
+
+    for _pair in "${_asa_pairs[@]}"; do
+      _sdir="${_pair%%:*}"
+      _adir="${_pair##*:}"
+      _label="$(basename "$_sdir")"
+      if compgen -G "$_sdir/*.pdb" > /dev/null 2>&1; then
+        echo "[7/8] ASA: $_label → $_adir"
+        bash "$PROJECT_ROOT/scripts/run_asa_all.sh" "$_sdir" "$_adir"
+      else
+        echo "  [WARN] No PDB files in $_sdir — skipping ASA."
+      fi
+    done
   fi
 
-  # ── 8. MD analysis ─────────────────────────────────────────────────────────
+  # ── 8. MD analysis (wild-type only — requires pre-computed trajectories) ───
   if [[ "$SKIP_MD" == "1" ]]; then
     echo "[8/8] Skipping MD analysis"
   else
@@ -393,10 +457,10 @@ for fasta in "${_all_fastas[@]}"; do
     disorder_table="$results_dir/disorder_1res/${seq_name}_1res_disorder_probability_comparison.csv"
 
     missing=()
-    [[ -f "$wt_top" ]]        || missing+=("$wt_top")
-    [[ -f "$wt_traj" ]]       || missing+=("$wt_traj")
-    [[ -f "$mut_top" ]]       || missing+=("$mut_top")
-    [[ -f "$mut_traj" ]]      || missing+=("$mut_traj")
+    [[ -f "$wt_top" ]]         || missing+=("$wt_top")
+    [[ -f "$wt_traj" ]]        || missing+=("$wt_traj")
+    [[ -f "$mut_top" ]]        || missing+=("$mut_top")
+    [[ -f "$mut_traj" ]]       || missing+=("$mut_traj")
     [[ -f "$disorder_table" ]] || missing+=("$disorder_table")
 
     if [[ ${#missing[@]} -gt 0 ]]; then
