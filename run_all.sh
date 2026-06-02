@@ -9,7 +9,9 @@
 #   5. Disorder analysis — comparison plots and CSV summaries
 #   6. ColabFold         — structure prediction (uses pre-computed MSAs if available)
 #   7. ASA               — per-residue accessible surface area on ColabFold PDBs
-#   8. MD analysis       — RMSF, contacts, DSSP (requires trajectory files)
+#   8. Summary figures   — 4 plots: label transitions, disorder change, ΔASA, DO/SS track
+#   9. MD simulation     — GROMACS all-atom MD (WT + top candidate), via gmx-gpu.sif
+#  10. MD analysis       — RMSF, contacts, DSSP (reads step-9 trajectories)
 #
 # Usage (from project root):
 #   bash run_all.sh [--force] [--clean] [configs/local.env]
@@ -99,7 +101,9 @@ echo "  4. ESMDisPred muts   — disorder prediction (mutants)"
 echo "  5. Disorder analysis — comparison plots and CSVs"
 echo "  6. ColabFold         — structure prediction"
 echo "  7. ASA               — accessible surface area"
-echo "  8. MD analysis       — RMSF, contacts, DSSP"
+echo "  8. Summary figures   — label transitions, disorder change, ΔASA, DO/SS track"
+echo "  9. MD simulation     — GROMACS (WT + top candidate)"
+echo " 10. MD analysis       — RMSF, contacts, DSSP"
 echo ""
 echo "Enter step numbers to run (e.g. 1 2 3  or  1-5  or  6 7)."
 echo "Press Enter with no input to run ALL steps."
@@ -116,10 +120,10 @@ fi
 
 # Parse selection into a set of enabled step numbers
 declare -A RUN_STEP
-for s in 1 2 3 4 5 6 7 8; do RUN_STEP[$s]=0; done
+for s in 1 2 3 4 5 6 7 8 9 10; do RUN_STEP[$s]=0; done
 
 if [[ -z "$STEP_INPUT" ]]; then
-  for s in 1 2 3 4 5 6 7 8; do RUN_STEP[$s]=1; done
+  for s in 1 2 3 4 5 6 7 8 9 10; do RUN_STEP[$s]=1; done
 else
   for token in $STEP_INPUT; do
     if [[ "$token" =~ ^([0-9]+)-([0-9]+)$ ]]; then
@@ -133,7 +137,7 @@ else
 fi
 
 echo ""
-echo "Running steps: $(for s in 1 2 3 4 5 6 7 8; do [[ ${RUN_STEP[$s]} -eq 1 ]] && printf '%s ' "$s"; done)"
+echo "Running steps: $(for s in 1 2 3 4 5 6 7 8 9 10; do [[ ${RUN_STEP[$s]} -eq 1 ]] && printf '%s ' "$s"; done)"
 echo "================================================================"
 echo ""
 
@@ -146,6 +150,7 @@ fi
 : "${ESMDISPRED_IMAGE:?ESMDISPRED_IMAGE is required — set it in $CONFIG_FILE}"
 : "${LARGE_MODELS_DIR:?LARGE_MODELS_DIR is required — set it in $CONFIG_FILE}"
 export BLAST_BIN  # make available to background psiblast subprocesses
+export GMX_SIF GMX_STEPS GMX_SAVE_EVERY GMX_FF GMX_WATER GMX_TEMP GMX_SALT GMX_PADDING GMX_GPU_OPTS
 
 INPUT_FASTA="${INPUT_FASTA:-$PROJECT_ROOT/data/input/example.fasta}"
 MODEL="${MODEL:-3}"
@@ -173,7 +178,9 @@ SKIP_MUTANT_PRED=$(( 1 - RUN_STEP[4] ))
 SKIP_ANALYSIS=$(( 1 - RUN_STEP[5] ))
 SKIP_COLABFOLD=$(( 1 - RUN_STEP[6] ))
 SKIP_ASA=$(( 1 - RUN_STEP[7] ))
-SKIP_MD=$(( 1 - RUN_STEP[8] ))
+SKIP_FIGURES=$(( 1 - RUN_STEP[8] ))
+SKIP_MD_SIM=$(( 1 - RUN_STEP[9] ))
+SKIP_MD=$(( 1 - RUN_STEP[10] ))
 
 
 SEQUENCES_DIR="$PROJECT_ROOT/outputs/sequences"
@@ -208,7 +215,7 @@ mapfile -t _all_fastas < <(
 _seq_count="${#_all_fastas[@]}"
 
 if [[ "$SKIP_PSSM" == "1" ]]; then
-  echo "[1/8] Skipping PSSM (all sequences)"
+  echo "[1/10] Skipping PSSM (all sequences)"
 elif [[ "$_seq_count" -gt 0 ]]; then
   # Divide cores evenly; cap at 16 per job (PSI-BLAST I/O-bound beyond that)
   _threads_each=$(( $(nproc) / _seq_count ))
@@ -259,21 +266,21 @@ for fasta in "${_all_fastas[@]}"; do
 
   # ── 1. PSSM (already done above in parallel) ───────────────────────────────
   if [[ "$SKIP_PSSM" == "1" ]]; then
-    echo "[1/8] Skipping PSSM"
+    echo "[1/10] Skipping PSSM"
   elif [[ -f "$pssm_out" ]]; then
-    echo "[1/8] PSSM done → $pssm_out"
+    echo "[1/10] PSSM done → $pssm_out"
   else
-    echo "[1/8] PSSM missing for $seq_name — something went wrong" >&2
+    echo "[1/10] PSSM missing for $seq_name — something went wrong" >&2
     exit 1
   fi
 
   # ── 2. ESMDisPred on original sequence ─────────────────────────────────────
   if [[ "$SKIP_ORIG_PRED" == "1" ]]; then
-    echo "[2/8] Skipping ESMDisPred (original)"
+    echo "[2/10] Skipping ESMDisPred (original)"
   elif [[ "$FORCE" == "0" && -f "$orig_caid" ]]; then
-    echo "[2/8] ESMDisPred (original) already exists, skipping → $orig_caid"
+    echo "[2/10] ESMDisPred (original) already exists, skipping → $orig_caid"
   else
-    echo "[2/8] ESMDisPred (original) → $orig_caid"
+    echo "[2/10] ESMDisPred (original) → $orig_caid"
     bash "$PROJECT_ROOT/scripts/run_esmdispred_single.sh" \
       "$fasta" "$dispred_dir" "$ESMDISPRED_IMAGE" "$LARGE_MODELS_DIR" \
       "${seq_name}_original" "$MODEL"
@@ -281,11 +288,11 @@ for fasta in "${_all_fastas[@]}"; do
 
   # ── 3. Generate mutant FASTA files ─────────────────────────────────────────
   if [[ "$SKIP_MUTANT_GEN" == "1" ]]; then
-    echo "[3/8] Skipping mutant generation"
+    echo "[3/10] Skipping mutant generation"
   elif [[ "$FORCE" == "0" ]] && compgen -G "$mutants_dir/*res.fasta" > /dev/null 2>&1; then
-    echo "[3/8] Mutant FASTAs already exist, skipping → $mutants_dir"
+    echo "[3/10] Mutant FASTAs already exist, skipping → $mutants_dir"
   else
-    echo "[3/8] Generating mutants (mode=$MUTATION_MODE) → $mutants_dir"
+    echo "[3/10] Generating mutants (mode=$MUTATION_MODE) → $mutants_dir"
     _seed_arg=()
     [[ -n "$MUTATION_SEED" ]] && _seed_arg=(--seed "$MUTATION_SEED")
     uv run --project "$PROJECT_ROOT" python "$PROJECT_ROOT/scripts/generate_mutants.py" \
@@ -305,7 +312,7 @@ for fasta in "${_all_fastas[@]}"; do
 
   # ── 4. ESMDisPred on mutant FASTAs ─────────────────────────────────────────
   if [[ "$SKIP_MUTANT_PRED" == "1" ]]; then
-    echo "[4/8] Skipping ESMDisPred (mutants)"
+    echo "[4/10] Skipping ESMDisPred (mutants)"
   else
     # Check each block size individually — only skip sizes that already have a .caid
     _need_pred=0
@@ -313,26 +320,26 @@ for fasta in "${_all_fastas[@]}"; do
       _fasta=$(find "$mutants_dir" -maxdepth 1 -name "*_mutants_${_i}res.fasta" | head -n 1)
       [[ -z "$_fasta" ]] && continue
       if [[ "$FORCE" == "0" && -f "$dispred_dir/${seq_name}_mutants_${_i}res.caid" ]]; then
-        echo "[4/8] Block ${_i}res already exists, skipping"
+        echo "[4/10] Block ${_i}res already exists, skipping"
       else
         _need_pred=1
       fi
     done
     if [[ "$_need_pred" == "1" ]]; then
-      echo "[4/8] ESMDisPred (mutants) → $dispred_dir"
+      echo "[4/10] ESMDisPred (mutants) → $dispred_dir"
       bash "$PROJECT_ROOT/scripts/run_esmdispred.sh" \
         "$mutants_dir" "$dispred_dir" "$ESMDISPRED_IMAGE" "$LARGE_MODELS_DIR" \
         "$seq_name" "$MAX_MUTATIONS" "$MODEL"
     else
-      echo "[4/8] All mutant predictions already exist → $dispred_dir"
+      echo "[4/10] All mutant predictions already exist → $dispred_dir"
     fi
   fi
 
   # ── 5. Disorder comparison analysis ────────────────────────────────────────
   if [[ "$SKIP_ANALYSIS" == "1" ]]; then
-    echo "[5/8] Skipping disorder analysis"
+    echo "[5/10] Skipping disorder analysis"
   else
-    echo "[5/8] Disorder analysis → $results_dir"
+    echo "[5/10] Disorder analysis → $results_dir"
     for i in $(seq 1 "$MAX_MUTATIONS"); do
       mutant_caid="$dispred_dir/${seq_name}_mutants_${i}res.caid"
       out_dir="$results_dir/disorder_${i}res"
@@ -370,18 +377,18 @@ for fasta in "${_all_fastas[@]}"; do
 
   # ── 6. Structure prediction (ColabFold) — wild-type + each candidate ───────
   if [[ "$SKIP_COLABFOLD" == "1" ]]; then
-    echo "[6/8] Skipping ColabFold"
+    echo "[6/10] Skipping ColabFold"
   else
     # ── 6a. Fetch MSA via remote if not already present ─────────────────────
     msa_file="$MSA_DIR/${seq_name}.a3m"
     if [[ -f "$msa_file" ]]; then
-      echo "[6/8] MSA already present → $msa_file"
+      echo "[6/10] MSA already present → $msa_file"
     elif [[ -n "${MSA_REMOTE_HOST:-}" && -n "${MSA_REMOTE_DIR:-}" ]]; then
-      echo "[6/8] MSA not found — submitting to $MSA_REMOTE_HOST via SLURM ..."
+      echo "[6/10] MSA not found — submitting to $MSA_REMOTE_HOST via SLURM ..."
       CONFIG_FILE="$CONFIG_FILE" \
         bash "$PROJECT_ROOT/scripts/generate_msa_remote.sh" "$fasta" "$MSA_DIR"
     else
-      echo "[6/8] WARN: No MSA found and MSA_REMOTE_HOST not set." \
+      echo "[6/10] WARN: No MSA found and MSA_REMOTE_HOST not set." \
            "ColabFold will attempt to reach the MSA server directly."
     fi
 
@@ -402,10 +409,10 @@ for fasta in "${_all_fastas[@]}"; do
       _cf_label="$(basename "$_cf_fasta" .fasta)"
 
       if [[ "$FORCE" == "0" ]] && compgen -G "$_cf_outdir/*.pdb" > /dev/null 2>&1; then
-        echo "[6/8] ColabFold already done, skipping → $_cf_outdir"
+        echo "[6/10] ColabFold already done, skipping → $_cf_outdir"
         continue
       fi
-      echo "[6/8] ColabFold: $_cf_label → $_cf_outdir"
+      echo "[6/10] ColabFold: $_cf_label → $_cf_outdir"
 
       # Use pre-computed WT MSA for all targets (valid for small mutations)
       if [[ -f "$msa_file" ]]; then
@@ -422,7 +429,7 @@ for fasta in "${_all_fastas[@]}"; do
 
   # ── 7. ASA — wild-type + each candidate ────────────────────────────────────
   if [[ "$SKIP_ASA" == "1" ]]; then
-    echo "[7/8] Skipping ASA"
+    echo "[7/10] Skipping ASA"
   else
     _asa_pairs=("$structure_dir:$asa_dir")
     if compgen -G "$candidates_dir/candidate_*.fasta" > /dev/null 2>&1; then
@@ -436,24 +443,91 @@ for fasta in "${_all_fastas[@]}"; do
       _sdir="${_pair%%:*}"
       _adir="${_pair##*:}"
       _label="$(basename "$_sdir")"
-      if compgen -G "$_sdir/*.pdb" > /dev/null 2>&1; then
-        echo "[7/8] ASA: $_label → $_adir"
-        bash "$PROJECT_ROOT/scripts/run_asa_all.sh" "$_sdir" "$_adir"
-      else
+      if ! compgen -G "$_sdir/*.pdb" > /dev/null 2>&1; then
         echo "  [WARN] No PDB files in $_sdir — skipping ASA."
+      elif [[ "$FORCE" == "0" ]] && compgen -G "$_adir/*.csv" > /dev/null 2>&1; then
+        echo "[7/10] ASA already exists, skipping → $_adir"
+      else
+        echo "[7/10] ASA: $_label → $_adir"
+        bash "$PROJECT_ROOT/scripts/run_asa_all.sh" "$_sdir" "$_adir"
       fi
     done
   fi
 
-  # ── 8. MD analysis (wild-type only — requires pre-computed trajectories) ───
-  if [[ "$SKIP_MD" == "1" ]]; then
-    echo "[8/8] Skipping MD analysis"
+  # ── 8. Summary figures — label transitions, disorder change, ΔASA, DO/SS ─────
+  figures_dir="$results_dir/figures"
+  if [[ "$SKIP_FIGURES" == "1" ]]; then
+    echo "[8/10] Skipping summary figures"
+  elif [[ "$FORCE" == "0" ]] && compgen -G "$figures_dir/*.png" > /dev/null 2>&1; then
+    echo "[8/10] Summary figures already exist, skipping → $figures_dir"
   else
-    echo "[8/8] MD analysis → $md_dir"
-    wt_top="$PROJECT_ROOT/data/pdb/${seq_name}_wt.pdb"
-    wt_traj="$PROJECT_ROOT/data/trajectories/${seq_name}_wt.xtc"
-    mut_top="$PROJECT_ROOT/data/pdb/${seq_name}_mutant.pdb"
-    mut_traj="$PROJECT_ROOT/data/trajectories/${seq_name}_mutant.xtc"
+    echo "[8/10] Summary figures → $figures_dir"
+    uv run --project "$PROJECT_ROOT" python "$PROJECT_ROOT/scripts/plot_summary_figures.py" \
+      --seq-name   "$seq_name" \
+      --results-dir "$results_dir" \
+      --dispred-dir "$dispred_dir" \
+      --max-block  "$MAX_MUTATIONS" \
+      --outdir     "$figures_dir"
+  fi
+
+  # ── 9. MD simulation (GROMACS) — WT rank_001 + top candidate rank_001 ────────
+  md_sim_dir="$results_dir/md_sim"
+  if [[ "$SKIP_MD_SIM" == "1" ]]; then
+    echo "[9/10] Skipping MD simulation"
+  else
+    echo "[9/10] MD simulation → $md_sim_dir"
+
+    # WT: rank_001 PDB from ColabFold WT structure dir
+    _wt_pdb=$(find "$structure_dir" -name "*rank_001*.pdb" 2>/dev/null | head -1)
+
+    # Mutant: rank_001 PDB from top candidate (candidate_1) structure dir
+    _cand1_sdir=$(ls -d "$results_dir"/structure_candidate_1_* 2>/dev/null | head -1)
+    _mut_pdb=""
+    if [[ -n "$_cand1_sdir" ]]; then
+      _mut_pdb=$(find "$_cand1_sdir" -name "*rank_001*.pdb" 2>/dev/null | head -1)
+    fi
+
+    _md_missing=()
+    [[ -n "$_wt_pdb"  && -f "$_wt_pdb"  ]] || _md_missing+=("WT rank_001 PDB not found in $structure_dir")
+    [[ -n "$_mut_pdb" && -f "$_mut_pdb" ]] || _md_missing+=("Candidate-1 rank_001 PDB not found")
+    [[ -n "${GMX_SIF:-}" ]] || _md_missing+=("GMX_SIF not set in config")
+
+    if [[ ${#_md_missing[@]} -gt 0 ]]; then
+      echo "  [WARN] MD simulation skipped for $seq_name:"
+      for _m in "${_md_missing[@]}"; do echo "    $_m"; done
+    elif [[ "$FORCE" == "0" && -f "$md_sim_dir/A_orig/md.xtc" && -f "$md_sim_dir/B_mut/md.xtc" ]]; then
+      echo "  [skip] MD trajectories already exist → $md_sim_dir"
+    else
+      echo "  WT:      $_wt_pdb"
+      echo "  Mutant:  $_mut_pdb"
+
+      # Fix PDBs — resolve clashes from ColabFold before passing to GROMACS
+      _fixed_dir="$md_sim_dir/fixed_pdbs"
+      mkdir -p "$_fixed_dir"
+      _wt_fixed="$_fixed_dir/wt_fixed.pdb"
+      _mut_fixed="$_fixed_dir/mut_fixed.pdb"
+
+      echo "  [fix_pdb] Fixing WT structure..."
+      uv run --project "$PROJECT_ROOT" python "$PROJECT_ROOT/scripts/fix_pdb.py" \
+        "$_wt_pdb" "$_wt_fixed"
+
+      echo "  [fix_pdb] Fixing mutant structure..."
+      uv run --project "$PROJECT_ROOT" python "$PROJECT_ROOT/scripts/fix_pdb.py" \
+        "$_mut_pdb" "$_mut_fixed"
+
+      bash "$PROJECT_ROOT/scripts/run_gromacs.sh" "$_wt_fixed" "$_mut_fixed" "$md_sim_dir"
+    fi
+  fi
+
+  # ── 9. MD analysis — RMSF, contacts, DSSP (reads step-8 trajectories) ────────
+  if [[ "$SKIP_MD" == "1" ]]; then
+    echo "[10/10] Skipping MD analysis"
+  else
+    echo "[10/10] MD analysis → $md_dir"
+    wt_top="$md_sim_dir/A_orig/md.gro"
+    wt_traj="$md_sim_dir/A_orig/md.xtc"
+    mut_top="$md_sim_dir/B_mut/md.gro"
+    mut_traj="$md_sim_dir/B_mut/md.xtc"
     disorder_table="$results_dir/disorder_1res/${seq_name}_1res_disorder_probability_comparison.csv"
 
     missing=()
@@ -466,6 +540,8 @@ for fasta in "${_all_fastas[@]}"; do
     if [[ ${#missing[@]} -gt 0 ]]; then
       echo "  [WARN] MD analysis skipped for $seq_name — missing files:"
       for f in "${missing[@]}"; do echo "    $f"; done
+    elif [[ "$FORCE" == "0" ]] && compgen -G "$md_dir/*.png" > /dev/null 2>&1; then
+      echo "  [skip] MD analysis already exists → $md_dir"
     else
       uv run --project "$PROJECT_ROOT" python "$PROJECT_ROOT/scripts/analyze_md.py" \
         --wt-top "$wt_top" \

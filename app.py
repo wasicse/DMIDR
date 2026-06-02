@@ -1,5 +1,5 @@
 """
-DMIDR Pipeline Dashboard
+DMIDR — Drosophila Matrisome Intrinsically Disordered Regions Pipeline Dashboard
 Run:  streamlit run app.py
 """
 
@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 PROJECT_ROOT = Path(__file__).parent
@@ -21,7 +22,7 @@ VALID_AA = set("ACDEFGHIKLMNPQRSTVWYBXZUOJ")
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="DMIDR Pipeline",
+    page_title="DMIDR — Drosophila Matrisome IDR Pipeline",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -131,6 +132,7 @@ def tail_log(path: str, n: int = 100) -> str:
              "TF_ENABLE_ONEDNN", "WARNING: All log messages"))]
     return "\n".join(keep[-n:])
 
+@st.cache_data(ttl=5)
 def outputs_summary() -> dict:
     result: dict = {}
     if not OUTPUT_DIR.exists():
@@ -151,6 +153,7 @@ def outputs_summary() -> dict:
     return result
 
 # ── GPU / Docker helpers ──────────────────────────────────────────────────────
+@st.cache_data(ttl=3)
 def gpu_info() -> dict | None:
     raw = sh("nvidia-smi --query-gpu=name,memory.used,memory.total,"
              "utilization.gpu,temperature.gpu --format=csv,noheader,nounits")
@@ -162,6 +165,7 @@ def gpu_info() -> dict | None:
                     util=int(p[3]), temp=int(p[4]))
     return None
 
+@st.cache_data(ttl=3)
 def gpu_procs() -> list[dict]:
     raw = sh("nvidia-smi --query-compute-apps=pid,used_memory,process_name "
              "--format=csv,noheader")
@@ -172,6 +176,7 @@ def gpu_procs() -> list[dict]:
             rows.append({"PID": p[0], "VRAM": p[1], "Process": Path(p[2]).name})
     return rows
 
+@st.cache_data(ttl=8)
 def docker_containers() -> list[dict]:
     raw = sh('docker ps --format "{{.ID}}|{{.Image}}|{{.Status}}|{{.Names}}"')
     rows = []
@@ -181,20 +186,24 @@ def docker_containers() -> list[dict]:
             rows.append({"id": p[0], "image": p[1], "status": p[2], "name": p[3]})
     return rows
 
+@st.cache_data(ttl=8)
 def container_progress(cid: str) -> dict | None:
-    feat  = sh(f'docker exec {cid} sh -c '
-               f'"ls /opt/ESMDisPred/features/Dispredict3.0/features/ 2>/dev/null | wc -l"')
-    total = sh(f'docker exec {cid} sh -c '
-               f'"grep -c \'>\' /opt/ESMDisPred/example/*.fasta 2>/dev/null"')
-    fasta = sh(f'docker exec {cid} sh -c '
-               f'"ls /opt/ESMDisPred/example/*.fasta 2>/dev/null | head -1 | xargs -r basename"')
-    esm2  = sh(f'docker exec {cid} sh -c '
-               f'"ls /opt/ESMDisPred/features/ESM2/Mutant_*.csv 2>/dev/null | wc -l"')
-    try:
-        return {"feat": int(feat), "total": int(total),
-                "fasta": fasta, "esm2": int(esm2)}
-    except Exception:
-        return None
+    raw = sh(
+        f'docker exec {cid} sh -c \''
+        f'feat=$(ls /opt/ESMDisPred/features/Dispredict3.0/features/ 2>/dev/null | wc -l); '
+        f'total=$(grep -c ">" /opt/ESMDisPred/example/*.fasta 2>/dev/null || echo 0); '
+        f'fasta=$(ls /opt/ESMDisPred/example/*.fasta 2>/dev/null | head -1 | xargs -r basename); '
+        f'esm2=$(ls /opt/ESMDisPred/features/ESM2/Mutant_*.csv 2>/dev/null | wc -l); '
+        f'echo "$feat|$total|$fasta|$esm2"\''
+    )
+    p = raw.split("|")
+    if len(p) == 4:
+        try:
+            return {"feat": int(p[0].strip()), "total": int(p[1].strip()),
+                    "fasta": p[2].strip(), "esm2": int(p[3].strip())}
+        except Exception:
+            pass
+    return None
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Sidebar
@@ -203,7 +212,8 @@ cfg_path = PROJECT_ROOT / "configs" / "local.env"
 cfg = load_env(cfg_path)
 
 with st.sidebar:
-    st.title("🧬 DMIDR Pipeline")
+    st.title("🧬 DMIDR")
+    st.caption("Drosophila Matrisome Intrinsically Disordered Regions Pipeline")
 
     # ── FASTA Input ───────────────────────────────────────────────────────────
     st.subheader("Sequence Input")
@@ -321,6 +331,9 @@ if stop_clicked and st.session_state.pid:
 tab_run, tab_gpu, tab_results = st.tabs(
     ["▶ Run & Monitor", "🖥 GPU & Containers", "📊 Results"])
 
+# Compute once — shared across all three tabs
+_summary = outputs_summary()
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Tab 1 — Run & Monitor
 # ─────────────────────────────────────────────────────────────────────────────
@@ -336,7 +349,7 @@ with tab_run:
         st.info("Configure a sequence and steps in the sidebar, then click **▶ Run**.")
 
     # Per-sequence output summary
-    summary = outputs_summary()
+    summary = _summary
     if summary:
         st.subheader("Outputs")
         for seq, info in summary.items():
@@ -368,8 +381,7 @@ with tab_run:
         st.caption("No log yet.")
 
     if running:
-        time.sleep(4)
-        st.rerun()
+        st.html('<meta http-equiv="refresh" content="5">')
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Tab 2 — GPU & Containers
@@ -435,54 +447,285 @@ with tab_gpu:
         st.rerun()
 
     if esm:
-        time.sleep(15)
-        st.rerun()
+        st.html('<meta http-equiv="refresh" content="15">')
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Tab 3 — Results
 # ─────────────────────────────────────────────────────────────────────────────
+def _wt_profile_fig(wt_df: pd.DataFrame, seq: str) -> go.Figure:
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=wt_df["pos"], y=wt_df["prob"],
+        mode="lines", name="Wild-type",
+        line=dict(color="#2196F3", width=2),
+    ))
+    fig.add_hline(y=0.5, line_dash="dash", line_color="gray",
+                  annotation_text="Disorder threshold (0.5)", annotation_position="bottom right")
+    fig.update_layout(
+        title=f"{seq} — Wild-Type Disorder Profile",
+        xaxis_title="Residue Position",
+        yaxis_title="Disorder Probability",
+        yaxis_range=[0, 1],
+        height=340,
+        margin=dict(l=40, r=20, t=50, b=40),
+        legend=dict(x=0.01, y=0.99),
+        hovermode="x unified",
+    )
+    return fig
+
+
+def _comparison_figs(comp_df: pd.DataFrame, title: str) -> tuple[go.Figure, go.Figure]:
+    # Overlay chart
+    fig_ov = go.Figure()
+    fig_ov.add_trace(go.Scatter(
+        x=comp_df["Position"], y=comp_df["DisorderProb_orig"],
+        mode="lines", name="Wild-type",
+        line=dict(color="#2196F3", width=2),
+    ))
+    fig_ov.add_trace(go.Scatter(
+        x=comp_df["Position"], y=comp_df["DisorderProb_mut"],
+        mode="lines", name="Mutant",
+        line=dict(color="#F44336", width=2),
+    ))
+    # Shaded region between WT and mutant
+    fig_ov.add_trace(go.Scatter(
+        x=list(comp_df["Position"]) + list(comp_df["Position"])[::-1],
+        y=list(comp_df["DisorderProb_orig"]) + list(comp_df["DisorderProb_mut"])[::-1],
+        fill="toself",
+        fillcolor="rgba(76,175,80,0.12)",
+        line=dict(color="rgba(0,0,0,0)"),
+        showlegend=False,
+        hoverinfo="skip",
+    ))
+    fig_ov.add_hline(y=0.5, line_dash="dash", line_color="gray",
+                     annotation_text="Threshold (0.5)", annotation_position="bottom right")
+    fig_ov.update_layout(
+        title=title,
+        xaxis_title="Residue Position",
+        yaxis_title="Disorder Probability",
+        yaxis_range=[0, 1],
+        height=360,
+        margin=dict(l=40, r=20, t=50, b=40),
+        legend=dict(x=0.01, y=0.99),
+        hovermode="x unified",
+    )
+
+    # Delta bar chart
+    colors = ["#4CAF50" if v > 0 else "#F44336" for v in comp_df["DeltaDisorder"]]
+    fig_delta = go.Figure()
+    fig_delta.add_trace(go.Bar(
+        x=comp_df["Position"],
+        y=comp_df["DeltaDisorder"],
+        marker_color=colors,
+        name="ΔDisorder",
+    ))
+    fig_delta.update_layout(
+        title="ΔDisorder per Residue  (green = reduction in mutant)",
+        xaxis_title="Residue Position",
+        yaxis_title="ΔDisorder (WT − Mut)",
+        height=260,
+        margin=dict(l=40, r=20, t=50, b=40),
+        showlegend=False,
+    )
+    return fig_ov, fig_delta
+
+
 with tab_results:
-    summary = outputs_summary()
+    summary = _summary
     if not summary:
         st.info("No outputs yet. Run the pipeline first.")
     else:
-        for seq, info in summary.items():
-            st.subheader(seq)
+        seq_names = list(summary.keys())
+        selected_seq = st.selectbox("Select sequence", seq_names, key="results_seq_sel")
+
+        if selected_seq:
+            seq  = selected_seq
+            info = summary[seq]
+            seq_dir   = OUTPUT_DIR / seq
+            disp_dir  = seq_dir / "dispred"
+            wt_caid   = disp_dir / f"{seq}_original.caid"
+            cand_csv  = seq_dir / "candidates" / "candidate_scores.csv"
+
+            # ── Summary metrics ───────────────────────────────────────────────
+            wt_df = None
+            if wt_caid.exists():
+                try:
+                    wt_df = pd.read_csv(wt_caid, sep="\t", header=None,
+                                        names=["pos", "aa", "prob", "label"])
+                except Exception:
+                    pass
+
+            m1, m2, m3, m4 = st.columns(4)
+            if wt_df is not None:
+                n_res = len(wt_df)
+                n_dis = int(wt_df["label"].sum())
+                m1.metric("Residues", f"{n_res:,}")
+                m2.metric("WT Disordered", f"{n_dis} ({n_dis / n_res * 100:.1f}%)")
+            else:
+                m1.metric("Residues", "—")
+                m2.metric("WT Disordered", "—")
+
+            m3.metric("Mutation blocks", len(info["mut_caids"]))
+
+            cand_df = None
+            if cand_csv.exists():
+                try:
+                    cand_df = pd.read_csv(cand_csv)
+                except Exception:
+                    pass
+            m4.metric("Candidates scored", len(cand_df) if cand_df is not None else 0)
+
+            st.divider()
+
+            # ── Candidate rankings ────────────────────────────────────────────
+            if cand_df is not None:
+                st.subheader("Candidate Rankings")
+                try:
+                    top_n = st.slider(
+                        "Show top N", 5, min(50, len(cand_df)),
+                        min(10, len(cand_df)), key="cand_top_n"
+                    )
+                    display_df = cand_df.head(top_n).copy()
+                    display_df.insert(0, "Rank", range(1, len(display_df) + 1))
+                    st.dataframe(
+                        display_df,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "Rank": st.column_config.NumberColumn(width="small"),
+                            "mutant_id": st.column_config.TextColumn("Mutant ID"),
+                            "block_size": st.column_config.NumberColumn("Block Size", width="small"),
+                            "avg_disorder_reduction": st.column_config.NumberColumn(
+                                "Avg Reduction ↑", format="%.4f",
+                                help="Mean (DisorderProb_WT − DisorderProb_mut) — higher is better"
+                            ),
+                            "total_disorder_reduction": st.column_config.NumberColumn(
+                                "Total Reduction", format="%.2f"
+                            ),
+                            "disordered_to_ordered": st.column_config.NumberColumn("Dis→Ord ↑", width="small",
+                                help="Residues that flipped from disordered (label=1) to ordered (label=0)"),
+                            "ordered_to_disordered": st.column_config.NumberColumn("Ord→Dis ↓", width="small"),
+                        },
+                    )
+
+                    dl_col, _ = st.columns([1, 3])
+                    dl_col.download_button(
+                        "⬇ Full rankings CSV",
+                        data=cand_csv.read_bytes(),
+                        file_name=f"{seq}_candidate_scores.csv",
+                        mime="text/csv",
+                        key=f"dl_scores_{seq}",
+                    )
+
+                    # Per-candidate FASTA downloads
+                    cand_dir   = seq_dir / "candidates"
+                    cand_fastas = sorted(cand_dir.glob("candidate_*.fasta"))
+                    if cand_fastas:
+                        st.caption("**Download candidate sequences:**")
+                        btn_cols = st.columns(min(len(cand_fastas), 4))
+                        for i, fp in enumerate(cand_fastas):
+                            btn_cols[i % 4].download_button(
+                                f"⬇ {fp.stem[:30]}",
+                                data=fp.read_bytes(),
+                                file_name=fp.name,
+                                mime="text/plain",
+                                key=f"dl_cand_{seq}_{i}",
+                            )
+                except Exception as e:
+                    st.error(f"Could not load candidate scores: {e}")
+
+                st.divider()
+
+            # ── Disorder profiles ─────────────────────────────────────────────
+            st.subheader("Disorder Profiles")
+
+            if wt_df is not None:
+                st.plotly_chart(_wt_profile_fig(wt_df, seq), use_container_width=True)
+
+                disorder_dirs = sorted(seq_dir.glob("disorder_*res"))
+                if disorder_dirs:
+                    block_names  = [d.name for d in disorder_dirs]
+                    sel_block    = st.selectbox("Block size comparison", block_names, key=f"blk_{seq}")
+                    block_dir    = seq_dir / sel_block
+                    comp_csv_path = block_dir / f"{seq}_{sel_block.replace('disorder_','')}_disorder_probability_comparison.csv"
+
+                    if comp_csv_path.exists():
+                        try:
+                            comp_df = pd.read_csv(comp_csv_path)
+                            # Summary bar under charts
+                            avg_red = comp_df["DeltaDisorder"].mean()
+                            n_improved = int((comp_df["DeltaDisorder"] > 0).sum())
+                            ca, cb, cc = st.columns(3)
+                            ca.metric("Avg ΔDisorder (WT−Mut)", f"{avg_red:.4f}",
+                                      delta_color="normal" if avg_red > 0 else "inverse")
+                            cb.metric("Residues improved", n_improved)
+                            cc.metric("Net improvement",
+                                      f"{n_improved / len(comp_df) * 100:.1f}%")
+
+                            fig_ov, fig_delta = _comparison_figs(
+                                comp_df, f"{seq} — WT vs Best {sel_block} Mutant"
+                            )
+                            st.plotly_chart(fig_ov,    use_container_width=True)
+                            st.plotly_chart(fig_delta, use_container_width=True)
+                        except Exception as e:
+                            st.error(f"Could not load comparison CSV: {e}")
+                    else:
+                        st.caption("No disorder comparison CSV for this block size yet.")
+
+                    # PNG plots
+                    png_plots = sorted(block_dir.glob("*.png"))
+                    if png_plots:
+                        with st.expander("PNG disorder plots"):
+                            for png in png_plots:
+                                st.image(str(png), caption=png.name, use_container_width=True)
+            else:
+                st.caption("Run ESMDisPred (step 2) to see disorder profiles.")
+
+            st.divider()
+
+            # ── Structure files ───────────────────────────────────────────────
+            structure_dir = seq_dir / "structure"
+            pdb_files = sorted(structure_dir.glob("**/*.pdb")) if structure_dir.exists() else []
+            if pdb_files:
+                st.subheader("Structure Files")
+                pdb_cols = st.columns(min(len(pdb_files), 3))
+                for i, pdb in enumerate(pdb_files):
+                    pdb_cols[i % 3].download_button(
+                        f"⬇ {pdb.name}",
+                        data=pdb.read_bytes(),
+                        file_name=pdb.name,
+                        mime="chemical/x-pdb",
+                        key=f"dl_pdb_{seq}_{i}",
+                    )
+
+            # ── Raw .caid viewer ──────────────────────────────────────────────
             all_caids = info["all_caids"]
-            if not all_caids:
-                st.caption("No .caid files yet.")
-                continue
-
-            sel = st.selectbox("Prediction file", [c.name for c in all_caids],
-                               key=f"caid_{seq}")
-            caid_path = next(c for c in all_caids if c.name == sel)
-
-            try:
-                df = pd.read_csv(caid_path, sep="\t", header=None,
-                                 names=["pos", "aa", "score", "binary"])
-
-                col_chart, col_stats = st.columns([3, 1])
-                with col_chart:
-                    st.line_chart(df.set_index("pos")["score"],
-                                  use_container_width=True,
-                                  color="#e05c2a")
-                with col_stats:
-                    n_dis = int(df["binary"].sum())
-                    st.metric("Residues",         len(df))
-                    st.metric("Disordered",        n_dis)
-                    st.metric("Disorder fraction", f"{n_dis/len(df)*100:.1f}%")
-
-                # Download button
-                st.download_button(
-                    label="⬇ Download .caid",
-                    data=caid_path.read_bytes(),
-                    file_name=caid_path.name,
-                    mime="text/plain",
-                    key=f"dl_{seq}_{sel}",
-                )
-
-                with st.expander("Raw data table"):
-                    st.dataframe(df, use_container_width=True, hide_index=True)
-
-            except Exception as e:
-                st.error(f"Could not parse {sel}: {e}")
+            if all_caids:
+                with st.expander("Raw .caid file viewer"):
+                    sel_caid = st.selectbox(
+                        "Prediction file", [c.name for c in all_caids], key=f"caid_{seq}"
+                    )
+                    caid_path = next(c for c in all_caids if c.name == sel_caid)
+                    try:
+                        caid_df = pd.read_csv(caid_path, sep="\t", header=None,
+                                              names=["pos", "aa", "score", "binary"])
+                        col_chart, col_stats = st.columns([3, 1])
+                        with col_chart:
+                            st.line_chart(caid_df.set_index("pos")["score"],
+                                          use_container_width=True, color="#e05c2a")
+                        with col_stats:
+                            n_dis = int(caid_df["binary"].sum())
+                            st.metric("Residues",  len(caid_df))
+                            st.metric("Disordered", n_dis)
+                            st.metric("Fraction",  f"{n_dis / len(caid_df) * 100:.1f}%")
+                        st.download_button(
+                            "⬇ Download .caid",
+                            data=caid_path.read_bytes(),
+                            file_name=caid_path.name,
+                            mime="text/plain",
+                            key=f"dl_{seq}_{sel_caid}",
+                        )
+                        with st.expander("Data table"):
+                            st.dataframe(caid_df, use_container_width=True, hide_index=True)
+                    except Exception as e:
+                        st.error(f"Could not parse {sel_caid}: {e}")

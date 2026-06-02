@@ -91,12 +91,18 @@ def write_fasta(path: str | Path, records: list[tuple[str, str]]) -> None:
 
 
 def load_disorder_probability_table(path: str | Path) -> pd.DataFrame:
-    """Load a CSV/TSV file with columns resid, disorder_prob."""
+    """Load a CSV/TSV file with columns resid, disorder_prob.
+
+    Also accepts the pipeline's disorder probability comparison CSV which uses
+    Position / DisorderProb_orig column names.
+    """
     path = Path(path)
     with path.open('r', encoding='utf-8', errors='ignore') as handle:
         first_line = handle.readline()
     sep = ',' if ',' in first_line else '\t' if '\t' in first_line else r'\s+'
     df = pd.read_csv(path, sep=sep, engine='python')
+    # Normalise alternative column names from the comparison CSV
+    df = df.rename(columns={'Position': 'resid', 'DisorderProb_orig': 'disorder_prob'})
     required = {'resid', 'disorder_prob'}
     missing = required - set(df.columns)
     if missing:
